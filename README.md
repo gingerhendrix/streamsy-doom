@@ -111,7 +111,7 @@ bun run destroy:cf
 
 Those two scripts explicitly select `--stage test --profile default`; review them before use. No deployment, destruction or authenticated plan was run for this batch. Do not use `prod` expecting a workers.dev URL.
 
-Earlier remote experiments observed that a busy Durable Object kept serving old code after redeploy until clients disconnected and it was evicted. Keep stored formats readable by both code versions; a redeploy must not be treated as an immediate object restart. This batch verifies only local workerd, not hosted latency, eviction, account limits or a production rollout.
+Earlier remote experiments observed that a busy Durable Object kept serving old code after redeploy until clients disconnected and it was evicted. Keep stored formats readable by both code versions; a redeploy must not be treated as an immediate object restart. Earlier batches verified local workerd; see the load-testing section below for hosted latency measurements and their limits. Hosted eviction and a production rollout remain unverified.
 
 ## Checks and limits
 
@@ -122,7 +122,7 @@ bun run test
 
 The suite verifies State upsert/update/delete folds, metadata-only v2 lifecycle writes, read-only scores, live replay-chain scores over WebSockets and long poll, Bun upgrade fallback, zero idle SQL activity on Bun and on all three workerd owner types, real idle timers and resume, server stats matching Bun/workerd across deaths and level restarts, byte/unit-size independence, trusted cache rebuilds, inherited fork scores, lost producer responses, the two-alarm chain, duplicate wakes, immutable replay bootstrap, restart recovery, sink initialization retries, public access policies, family ownership, and 5,000-tic deterministic capture/replay on legacy and v2 paths, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
 
-This is an unauthenticated demo, with no load test or unlimited archive guarantee. Important limits:
+This is an unauthenticated demo with limited hosted load measurements and no unlimited archive guarantee. Important limits:
 
 - Session frames, batch manifests, snapshot/index writes and lobby rows are separate, nontransactional operations. An interruption can leave a partial session, missing metadata or an unindexed snapshot. There is no repair/retry flow; ambiguous network writes stop recording.
 - A v2 append has **two POSTs**: session and batch manifest. Session metadata writes only at create, fork and end; delete removes its State row. Snapshots require additional writes. Legacy API callers retain their existing lobby publication option.
@@ -130,6 +130,10 @@ This is an unauthenticated demo, with no load test or unlimited archive guarante
 - Browser unload can lose queued writes and leave a stale playing row. Use End before closing or reloading. Async unload handlers cannot guarantee a drain.
 - Frames and full heaps remain in browser memory. Baseline heaps add 16 MiB per engine, compression runs on the main thread, and snapshots must be trusted and match build/WAD/settings. Never restore untrusted heap data.
 - Each fork family shares one storage object; each session gets a replay object, and all scores share a lobby object. Popular families and the lobby can still bottleneck. There are no access controls or rate limits. Browser ownership is only a convenience.
+
+## Load testing
+
+The [Bun load harness](scripts/loadtest/README.md) exercises v2 families, sibling forks, deep lineages, cold rebuilds, and live lobby followers. [Hosted measurements and the failure that stopped testing](docs/performance.md) include latency, cleanup, and telemetry limits. The harness never deploys.
 
 ## Licence and source
 
