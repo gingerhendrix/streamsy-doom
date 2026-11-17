@@ -8,11 +8,14 @@
     "build:engine": "bun engine/scripts/build.ts",
     "test": "bun test engine/test test",
     "typecheck": "tsc --noEmit",
-    "dev:host": "bun apps/host-bun/host.ts"
+    "dev:host": "bun apps/host-bun/host.ts",
+    "build:web": "bun scripts/build-web.ts",
+    "dev": "bun scripts/dev.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.4",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.2",

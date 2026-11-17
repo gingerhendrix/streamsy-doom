@@ -23,6 +23,7 @@
     "test/**/*.ts",
     "engine/src/engine.js",
     "engine/test/**/*.ts",
-    "engine/scripts/**/*.ts"
+    "engine/scripts/**/*.ts",
+    "scripts/**/*.ts"
   ]
 }

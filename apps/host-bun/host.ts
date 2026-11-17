@@ -13,6 +13,7 @@ export const exposedHeaders = [
 ];
 export async function startHost(options: {
   port?: number; hostname?: string; database?: string; staticDirectory?: string; longPollTimeoutMs?: number;
+  wadPath?: string;
   onRequest?: (request: Request, response: Response) => void;
 } = {}) {
   const storage = BunStorage.layerProtocol({
@@ -30,7 +31,12 @@ export async function startHost(options: {
       let response: Response;
       if (url.pathname.startsWith("/doom/")) response = await web.handler(request);
       else if (request.method !== "GET" && request.method !== "HEAD") response = new Response(null, { status: 405 });
-      else {
+      else if (url.pathname === "/game.wad" || url.pathname === "/freedoom/COPYING.txt" || url.pathname === "/freedoom/CREDITS.txt") {
+        const data = fileURLToPath(new URL("../../engine/data/", import.meta.url));
+        const path = url.pathname === "/game.wad" ? (options.wadPath ?? process.env.DOOM_WAD ?? data + "freedoom1.wad") : data + url.pathname.split("/").at(-1);
+        const file = Bun.file(path);
+        response = await file.exists() ? new Response(request.method === "HEAD" ? null : file, { headers: { "Content-Type": file.type } }) : new Response(null, { status: 404 });
+      } else {
         try {
           const path = await realpath(resolve(directory, "." + decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname)));
           if (!path.startsWith(directory + sep)) response = new Response(null, { status: 404 });
