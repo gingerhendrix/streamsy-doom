@@ -17,7 +17,7 @@ bun test
 `bun run build:engine` builds from source in one command, using the pinned Docker
 Emscripten image. It requires no WAD, host compiler or SDL. It emits ignored
 `engine/build/doom.js`, `doom.wasm`, and `build-id.js` (the WASM SHA-256).
-Dependencies are used only by the Freedoom fetch script. Audio is disabled.
+Audio is disabled.
 
 To use a legally obtained Doom Phase 1/shareware IWAD instead:
 
@@ -124,43 +124,41 @@ For direct module use, set immutable `module.wadBytes` and write those bytes to
 
 ## Snapshot contract and measured sizes
 
-`snapshot()` copies **all 16,777,216 bytes** of `HEAPU8` between C calls, plus
-metadata: format version, WASM build SHA-256, IWAD SHA-256, initial skill/episode/
-map, and completed tic. `restore(snapshot)` validates identity and length, then
-copies the heap into an initialized fresh instance, or rewinds the same instance.
-The checkpoint owns its bytes and can be reused. Capture at a completed tic;
-for a snapshot at tic N, replay starts with zero-based frame N.
+`snapshot()` format version **2** stores a bytewise XOR of the entire 16 MiB
+heap against a baseline captured immediately after initialization. Immutable
+initial resources become zeroes, so gzip compresses them away. This keeps every
+byte (static data, zone allocator, stack, malloc state and renderer caches)
+without assuming which regions are live. `restore` XORs with that same baseline;
+it works on a fresh or advanced instance. Capture only between WASM calls.
+The checkpoint owns its bytes and can be reused. At tic N, replay starts with
+zero-based frame N. Version 1 whole-heap snapshots are rejected.
 
-Memory growth, threads, Asyncify and live WASM stack frames are absent. All
-mutable engine/allocator state is in linear memory; the fresh instance has the
-same function table and idle stack pointer. WAD reads use immutable JS bytes and
-absolute offsets, with no file descriptor, buffer or seek cursor to snapshot.
-The JS filesystem is only used during initialization/discovery. The same build,
-WAD and initial settings are required. Never restore arbitrary untrusted heaps.
-Compression and persistence belong to callers; retain the metadata alongside
-the raw/gzipped heap. Snapshots are build-specific, not a portable save format.
+Metadata includes format version, WASM build SHA-256, IWAD SHA-256, initial
+skill/episode/map and completed tic. Identity and length are checked on restore.
+A baseline is held per instance (16 MiB additional JS memory). Memory growth,
+threads, Asyncify and live WASM stack frames are absent. The same build, WAD and
+settings reconstruct the baseline. WAD reads use immutable JS bytes with absolute
+offsets; no JS filesystem cursor enters snapshots. Never restore untrusted heaps.
+Compression and persistence belong to callers; retain the metadata alongside the
+gzipped delta. Snapshots are build-specific, not portable saves.
 
-Freedoom Phase 1 0.13.0, E1M1, skill 3, tic 1100 in the scripted test:
+Freedoom Phase 1 0.13.0, E1M1, skill 3, scripted test, same WASM build:
 
-| Heap snapshot | Bytes |
-| --- | ---: |
-| Raw | 16,777,216 |
-| gzip level 9 | 2,462,045 |
+| Encoding / tic | Raw bytes | gzip level 9 bytes |
+| --- | ---: | ---: |
+| Previous whole heap / 1100 | 16,777,216 | 2,462,045 |
+| Version 2 XOR delta / 1100 | 16,777,216 | 196,737 |
+| Version 2 XOR delta / 4200 | 16,777,216 | 170,403 |
 
-These sizes exclude the small metadata object. The test prints current sizes and
-identities; gzip size depends on input, render history, WAD and build. Whole
-memory is deliberate for correctness, including stack/static data and allocator
-state; no partial-heap restore assumption is made.
-
-**Plan consequence:** this measured gzip is larger than the planned Cloudflare
-`maxMessageSize: 2_000_000`. A later host batch must account for this measurement
-before storing snapshots. This engine batch does not change host settings.
+Both fit the host's 2,000,000-byte limit, including the small metadata envelope.
+Sizes depend on WAD, input, build and rendering. This is lossless baseline delta
+encoding rather than a reduced C memory allocation or selective heap copy.
 
 ## Replay check
 
-`engine/test/replay.test.ts` records 2,500 tics with movement, turning, strafing,
+`engine/test/replay.test.ts` records 5,000 tics with movement, turning, strafing,
 fire and use, then compares every command, RNG byte and state hash against a
 fresh replay. It restores a tic-1100 snapshot in another fresh engine and checks
-the remaining 1,400 tics. Player and observer render at different cadences. It
+the remaining 3,900 tics. Player and observer render at different cadences. A second checkpoint at tic 4200 is restored and replayed too. It
 also rejects mismatched snapshot identities and invalid commands, rewinds an
 advanced instance, and checks that a corrupted RNG byte reports drift.

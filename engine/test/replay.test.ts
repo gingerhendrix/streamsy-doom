@@ -10,10 +10,10 @@ const wadPath = process.env.DOOM_WAD ?? fileURLToPath(new URL("../data/freedoom1
 const missing = [wadPath, `${build}/doom.js`, `${build}/doom.wasm`, `${build}/build-id.js`].filter(p => !existsSync(p));
 if (missing.length) console.warn(`SKIP engine replay: missing ${missing.join(", ")}. Run bun run fetch-wad && bun run build:engine, or set DOOM_WAD.`);
 
-const count = 2500;
+const count = 5000;
 const middle = 1100;
 
-test.skipIf(missing.length > 0)("2500 tics: capture, replay from zero, restore in fresh instance, detect drift", async () => {
+test.skipIf(missing.length > 0)("5000 tics: capture, replay from zero, restore in fresh instance, detect drift", async () => {
   const wad = await Bun.file(wadPath).bytes();
   const wasmBinary = await Bun.file(`${build}/doom.wasm`).bytes();
   const create = () => createEngine(wad, { wasmBinary, skill: 3, episode: 1, map: 1 });
@@ -23,6 +23,7 @@ test.skipIf(missing.length > 0)("2500 tics: capture, replay from zero, restore i
   const frames: Uint8Array[] = [];
   const hashes: number[] = [];
   const held = new Map<number, boolean>();
+  const checkpoints: ReturnType<typeof player.snapshot>[] = [];
   let snapshot: ReturnType<typeof player.snapshot> | undefined;
   const applyScript = (tic: number) => {
     const phase = Math.floor(tic / 175) % 8;
@@ -51,7 +52,11 @@ test.skipIf(missing.length > 0)("2500 tics: capture, replay from zero, restore i
       expect(pixels.some((b, index) => index % 4 !== 3 && b !== 0)).toBe(true);
       expect(player.hash()).toBe(before);
     }
-    if (player.tic === middle) snapshot = player.snapshot();
+    if (player.tic === middle || player.tic === 4200) {
+      const checkpoint = player.snapshot();
+      checkpoints.push(checkpoint);
+      if (player.tic === middle) snapshot = checkpoint;
+    }
   }
   expect(frames.some(f => f[0] > 0 && f[0] < 128)).toBe(true);
   expect(frames.some(f => f[0] > 127)).toBe(true);
@@ -99,6 +104,17 @@ test.skipIf(missing.length > 0)("2500 tics: capture, replay from zero, restore i
   expect(restored.driftCount).toBe(1);
   expect(restored.tic).toBe(middle + 1); // Drift reports an already-consumed tic.
 
+  for (const checkpoint of checkpoints) {
+    restored.restore(checkpoint);
+    expect(restored.hash()).toBe(hashes[checkpoint.tic - 1]);
+    for (let i = checkpoint.tic; i < count; i++) {
+      restored.step(frames[i]);
+      expect(restored.hash()).toBe(hashes[i]);
+    }
+    const size = gzipSync(checkpoint.heap, { level: 9 }).byteLength;
+    expect(size).toBeLessThan(2_000_000);
+    console.log(`E1M1 tic ${checkpoint.tic}: raw=${checkpoint.heap.length}, gzip=${size}`);
+  }
   const raw = snapshot!.heap.byteLength;
   const gzip = gzipSync(snapshot!.heap, { level: 9 }).byteLength;
   console.log(`E1M1 tic ${middle}: snapshot raw=${raw} bytes, gzip(level 9)=${gzip} bytes; IWAD SHA-256=${player.identity.wadSha256}; build=${player.identity.buildId}`);

@@ -26,7 +26,8 @@ export async function createEngine(wad, {
   // reads of wadBytes, so no JS file cursor or mutable FS state enters snapshots.
   module.FS.writeFile("/doom1.wad", wadBytes);
   if (module._dg_init(skill, episode, map)) throw new Error("Engine initialization failed");
-  const identity = Object.freeze({ version: 1, buildId, wadSha256, skill, episode, map });
+  const baseline = module.HEAPU8.slice();
+  const identity = Object.freeze({ version: 2, buildId, wadSha256, skill, episode, map });
   return {
     identity,
     get tic() { return module._dg_gametic(); },
@@ -51,7 +52,9 @@ export async function createEngine(wad, {
     },
     snapshot() {
       // Only call between exports, with no WASM stack frame active.
-      return { ...identity, tic: module._dg_gametic(), heap: module.HEAPU8.slice() };
+      const heap = module.HEAPU8.slice();
+      for (let i = 0; i < heap.length; i++) heap[i] ^= baseline[i];
+      return { ...identity, tic: module._dg_gametic(), heap };
     },
     restore(snapshot) {
       for (const [name, value] of Object.entries(identity)) {
@@ -61,7 +64,8 @@ export async function createEngine(wad, {
         throw new Error("Snapshot heap size mismatch");
       // Memory size is fixed. A fresh instance has the same indirect function
       // table and stack pointer; every mutable simulation field lives in memory.
-      module.HEAPU8.set(snapshot.heap);
+      for (let i = 0; i < baseline.length; i++)
+        module.HEAPU8[i] = snapshot.heap[i] ^ baseline[i];
       if (module._dg_gametic() !== snapshot.tic) throw new Error("Snapshot tic mismatch");
     },
     render() {
