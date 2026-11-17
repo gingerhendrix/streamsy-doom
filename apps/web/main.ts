@@ -2,10 +2,11 @@
 import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionRow, type SessionWriter, type Checkpoint } from "../../src/streams";
 import type { Engine } from "../../engine/src/engine.js";
 import { FixedStep, FrameQueue, Throttle } from "./timing";
+import { loadWad } from "../../src/wad";
 import "./style.css";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-app.innerHTML = `<header><h1>Streamsy <span>Doom</span></h1><p>A game made of streams.</p></header><p id="error" role="alert"></p><main></main><footer><a id="source">Source: GPL-2.0-or-later</a> · <span id="source-note"></span><br>Game data: Freedoom Phase 1 0.13.0 · BSD-3-Clause · <a href="/freedoom/COPYING.txt">Licence</a> · <a href="/freedoom/CREDITS.txt">Credits</a>. Engine: DoomGeneric / id Software. No audio.</footer>`;
+app.innerHTML = `<header><h1>Streamsy <span>Doom</span></h1><p>A game made of streams.</p></header><p id="error" role="alert"></p><main></main><footer><a id="source">Source: GPL-2.0-or-later</a> · <span id="source-note"></span><br>Game data: <a href="/wad/manifest.json">WAD manifest and notices</a>. Default: Freedoom Phase 1 0.13.0 · BSD-3-Clause. Engine: DoomGeneric / id Software. No audio.</footer>`;
 const source = document.querySelector<HTMLAnchorElement>("#source")!;
 // Supply the future public source URL at build time. Keep an explicit placeholder.
 const sourceUrl = (import.meta as ImportMeta & { env: Record<string, string> }).env.VITE_SOURCE_URL;
@@ -32,7 +33,7 @@ async function engine(settings: { skill: number; episode?: number; map?: number 
   assets ??= (async () => {
     const bytes = async (url: string) => { const response = await fetch(url); if (!response.ok) throw new Error(`Engine asset ${url}: ${response.status}`); return new Uint8Array(await response.arrayBuffer()); };
     const runtimeUrl = "/engine/src/engine.js";
-    const [wad, wasmBinary, runtime] = await Promise.all([bytes("/game.wad"), bytes("/engine/build/doom.wasm"), import(/* @vite-ignore */ runtimeUrl)]);
+    const [wad, wasmBinary, runtime] = await Promise.all([loadWad(), bytes("/engine/build/doom.wasm"), import(/* @vite-ignore */ runtimeUrl)]);
     return { wad, wasmBinary, runtime };
   })();
   const { wad, wasmBinary, runtime } = await assets;
