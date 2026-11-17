@@ -131,6 +131,18 @@ uint32_t dg_state_hash(void)
     }
     return h;
 }
+/* Stable signed 32-bit ABI; no compiler struct layout crosses into JS. */
+static int32_t stats[16];
+int32_t *dg_stats(void)
+{
+    player_t *p = &players[consoleplayer];
+    stats[0] = gametic; stats[1] = gamestate; stats[2] = gameepisode; stats[3] = gamemap;
+    stats[4] = leveltime; stats[5] = p->playerstate; stats[6] = p->health; stats[7] = p->armorpoints;
+    stats[8] = p->killcount; stats[9] = p->itemcount; stats[10] = p->secretcount;
+    stats[11] = totalkills; stats[12] = totalitems; stats[13] = totalsecret;
+    stats[14] = p->readyweapon; stats[15] = p->ammo[0];
+    return stats;
+}
 void dg_render(void) { if (initialized) D_Display(); }
 pixel_t *dg_pixels(void) { return DG_ScreenBuffer; }
 

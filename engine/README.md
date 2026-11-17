@@ -16,7 +16,8 @@ bun test
 
 `bun run build:engine` builds from source in one command, using the pinned Docker
 Emscripten image. It requires no WAD, host compiler or SDL. It emits ignored
-`engine/build/doom.js`, `doom.wasm`, and `build-id.js` (the WASM SHA-256).
+`engine/build/doom.js`, `doom.wasm`, `doom-worker.js`, `doom-worker.wasm`, and
+`build-id.js` (the WASM SHA-256). The build asserts that both WASM files are identical.
 Audio is disabled.
 
 To use a legally obtained Doom Phase 1/shareware IWAD instead:
@@ -42,6 +43,7 @@ const engine = await createEngine(wadBytes, { wasmBinary, skill: 3, episode: 1, 
 engine.key(keys.up, true);
 const frame = engine.step(); // A new Uint8Array(9), one completed game tic.
 const hash = engine.hash();
+const stats = engine.stats(); // Named numbers from dg_stats; no rendering required.
 const checkpoint = engine.snapshot();
 
 const observer = await createEngine(wadBytes, { wasmBinary, skill: 3, episode: 1, map: 1 });
@@ -112,6 +114,7 @@ The generated module factory resolves to a module with these underscored exports
 | `dg_frame()` | Pointer to latest nine-byte captured frame, valid until next step |
 | `dg_gametic()` / `dg_prndindex()` | Completed tic count / post-tic RNG index |
 | `dg_drift_count()` | Number of injected RNG mismatches |
+| `dg_stats()` | Pointer to 16 signed 32-bit values: tic, game state, episode, map, level time, player state, health, armor, kills, items, secrets, level totals (kills/items/secrets), weapon, bullets |
 | `dg_state_hash()` | Unsigned 32-bit FNV-1a diagnostic, words serialized little-endian |
 | `dg_render()` / `dg_pixels()` | Render without stepping / pointer to 320 × 200 packed `0x00RRGGBB` pixels |
 
@@ -121,6 +124,27 @@ momentum and health. It is a diagnostic with collision risk, not a cryptographic
 or exhaustive world-state hash. The adapter also exports `FS` and `HEAPU8`.
 For direct module use, set immutable `module.wadBytes` and write those bytes to
 `/doom1.wad` through `module.FS` before `dg_init`.
+
+## Headless server adapter
+
+`engine/src/headless.ts` creates replay-only engines from a shared factory. Reuse
+that factory for the isolate: it retains one immutable WAD and one pre-init 16 MiB
+baseline, with one 16 MiB WASM heap per engine. IWAD discovery uses an empty MEMFS
+file; actual reads use the existing positional WAD adapter. There is no second
+MEMFS WAD copy and no per-engine snapshot baseline. `reset(identity)` reuses the
+heap and trusted pre-init baseline; `step(frame)` returns false on RNG drift and
+throws for malformed commands. Neither operation accepts player snapshots.
+`stats()` returns the same named values as the browser; `ammo` currently means
+bullets (`player.ammo[0]`). Engine kill/item/secret counts reset on level restart.
+
+`apps/host-cloudflare/engine.ts` verifies asset WAD parts with `loadWad`, caches the
+shared factory, and supplies `instantiateWasm` using a precompiled module import.
+The worker-only glue scopes Emscripten environment probes to the Worker despite
+`nodejs_compat`; it never modifies global objects. `scripts/bundle-worker.ts`
+retains the WASM import for Cloudflare and local workerd's `CompiledWasm` loader.
+`apps/host-bun/engine.ts` provides the same adapter with Bun's WASM bytes loader.
+These adapters are tested independently; the application still uses batch 1's
+counter while the replay projection is blocked (see `replay-stats-handoff.md`).
 
 ## Snapshot contract and measured sizes
 

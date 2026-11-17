@@ -6,7 +6,8 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const scriptPath = `${root}apps/host-cloudflare/dist/worker/worker.js`;
 if (!await Bun.file(scriptPath).exists()) throw new Error("Run bun run build:cf first");
 const runtime = new Miniflare({
-  scriptPath, modules: true, compatibilityDate: "2026-07-30", compatibilityFlags: ["nodejs_compat"],
+  modulesRoot: `${root}apps/host-cloudflare/dist/worker`,
+  modules: [{ type: "ESModule", path: scriptPath }, { type: "CompiledWasm", path: `${root}apps/host-cloudflare/dist/worker/doom.wasm` }], compatibilityDate: "2026-07-30", compatibilityFlags: ["nodejs_compat"],
   host: "127.0.0.1", port: Number(process.env.PORT ?? 3000), cf: false,
   assets: { directory: `${root}apps/host-cloudflare/dist/assets`, binding: "ASSETS",
     routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },

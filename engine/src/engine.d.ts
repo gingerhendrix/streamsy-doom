@@ -4,11 +4,16 @@ export interface EngineIdentity {
   version: number; buildId: string; wadSha256: string; skill: number; episode: number; map: number;
 }
 export interface EngineSnapshot extends EngineIdentity { tic: number; heap: Uint8Array }
+export type EngineStats = Record<"tic" | "gamestate" | "episode" | "map" | "leveltime" | "playerstate" |
+  "health" | "armor" | "kills" | "items" | "secrets" | "totalKills" | "totalItems" | "totalSecrets" | "weapon" | "ammo", number>;
+export const statNames: readonly (keyof EngineStats)[];
+export function readStats(module: any): EngineStats;
 export interface Engine {
   readonly identity: EngineIdentity;
   readonly tic: number;
   readonly prndindex: number;
   readonly driftCount: number;
+  stats(): EngineStats;
   hash(): number;
   key(code: number, down: boolean): void;
   step(frame?: Uint8Array): Uint8Array;

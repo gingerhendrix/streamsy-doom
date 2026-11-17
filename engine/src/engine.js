@@ -33,6 +33,7 @@ export async function createEngine(wad, {
     get tic() { return module._dg_gametic(); },
     get prndindex() { return module._dg_prndindex(); },
     get driftCount() { return module._dg_drift_count(); },
+    stats() { return readStats(module); },
     hash() { return module._dg_state_hash() >>> 0; },
     key(key, down) {
       if (!Number.isInteger(key) || typeof down !== "boolean" || module._dg_key(key, Number(down)))
@@ -80,4 +81,11 @@ export async function createEngine(wad, {
       return pixels;
     },
   };
+}
+
+export const statNames = Object.freeze(["tic", "gamestate", "episode", "map", "leveltime", "playerstate",
+  "health", "armor", "kills", "items", "secrets", "totalKills", "totalItems", "totalSecrets", "weapon", "ammo"]);
+export function readStats(module) {
+  const values = new Int32Array(module.HEAPU8.buffer, module._dg_stats(), statNames.length);
+  return Object.fromEntries(statNames.map((name, index) => [name, values[index]]));
 }
