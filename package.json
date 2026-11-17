@@ -6,9 +6,20 @@
   "scripts": {
     "fetch-wad": "bun engine/scripts/fetch-wad.ts",
     "build:engine": "bun engine/scripts/build.ts",
-    "test": "bun test engine/test"
+    "test": "bun test engine/test",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.1.2",
+    "@effect/sql-sqlite-bun": "4.1.2",
+    "@streamsy/core": "0.12.0",
+    "@streamsy/serve": "0.12.0",
+    "@streamsy/storage": "0.12.0",
+    "effect": "4.1.2",
     "fflate": "0.8.2"
   }
 }
