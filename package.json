@@ -10,20 +10,35 @@
     "typecheck": "tsc --noEmit",
     "dev:host": "bun apps/host-bun/host.ts",
     "build:web": "bun scripts/build-web.ts",
-    "dev": "bun scripts/dev.ts"
+    "dev": "bun scripts/dev.ts",
+    "build:wad": "bun scripts/build-wad.ts",
+    "build:cf": "bun run build:engine && bun run build:web && bun scripts/build-cf.ts",
+    "dev:cf": "bun scripts/dev-cf.ts",
+    "deploy:cf": "cd apps/host-cloudflare && alchemy deploy --stage test --profile default",
+    "destroy:cf": "cd apps/host-cloudflare && alchemy destroy --stage test --profile default"
   },
   "devDependencies": {
+    "@alchemy.run/cloudflare": "2.0.0-beta.85",
+    "@cloudflare/workers-types": "5.20261117.1",
+    "@effect/platform-node": "4.1.2",
     "@types/bun": "1.4.4",
+    "alchemy": "2.0.0-beta.85",
+    "miniflare": "4.20260730.0",
     "typescript": "7.0.2",
     "vite": "8.3.8"
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.2",
     "@effect/sql-sqlite-bun": "4.1.2",
+    "@effect/sql-sqlite-do": "4.1.2",
     "@streamsy/core": "0.12.0",
     "@streamsy/serve": "0.12.0",
     "@streamsy/storage": "0.12.0",
     "effect": "4.1.2",
     "fflate": "0.8.2"
+  },
+  "overrides": {
+    "@effect/sql-d1": "4.1.2",
+    "@effect/sql-sqlite-do": "4.1.2"
   }
 }
