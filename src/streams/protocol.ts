@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { isFamilyId } from "./ids";
+export const absoluteExpiry = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+export const projectionReadPath = (path: string) => /^doom\/v2\/(sessions|batches|replay-wake|events)\//.test(path);
 export const binary = "application/octet-stream";
 export const sessionPath = (id: string) => `${isFamilyId(id) ? "doom/v2" : "doom"}/sessions/${validId(id)}`;
 export const batchPath = (id: string) => `${isFamilyId(id) ? "doom/v2" : "doom"}/batches/${validId(id)}`;
@@ -35,7 +37,8 @@ export class ProtocolClient {
     return response;
   }
   async create(path: string, body: Uint8Array | string, type = binary, ttl = 43200, extra: Record<string, string> = {}) {
-    return this.request(path, { method: "PUT", headers: { "Content-Type": type, "Stream-TTL": String(ttl), ...extra }, body: body as BodyInit });
+    const expiry: Record<string, string> = projectionReadPath(path) ? { "Stream-Expires-At": absoluteExpiry() } : { "Stream-TTL": String(ttl) };
+    return this.request(path, { method: "PUT", headers: { "Content-Type": type, ...expiry, ...extra }, body: body as BodyInit });
   }
   async append(path: string, body: Uint8Array | string, type = binary, extra: Record<string, string> = {}) {
     return this.request(path, { method: "POST", headers: { "Content-Type": type, ...extra }, body: body as BodyInit });

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import { absoluteExpiry } from "../../src/streams/protocol";
 import type { DurableObjectNamespace, DurableObjectState, ExecutionContext, IncomingRequestCfProperties, Request as WorkerRequest, Fetcher } from "@cloudflare/workers-types";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
@@ -9,7 +10,10 @@ import { Placement, StreamsyObject, router, type ObjectInstance } from "@streams
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
 import { familyOf } from "../../src/streams/ids";
 import { familyStreams, lobbyStreams, ReplayWake, LobbyStream, Scores, Sessions } from "../../src/streams/v2";
-import { frameWake, frameCounter } from "../../src/projection/counter";
+import { frameWake } from "../../src/projection/wake";
+import { replayStats, replayIdle } from "../../src/projection/stats";
+import { ReplayEngines } from "../../src/projection/engines";
+import { serverEngine } from "./engine";
 import { placement, framesLink, wakeLink, scoresLink } from "./topology";
 
 export interface Env { STREAMS: DurableObjectNamespace; GAMES: DurableObjectNamespace; REPLAYS: DurableObjectNamespace; LOBBY: DurableObjectNamespace; ASSETS: Fetcher }
@@ -35,39 +39,43 @@ export const DoomLobby = StreamsyObject.make<Env, Layer.Success<ReturnType<typeo
   layer: lobbyLayer,
 });
 
-function replayHost(id: string, state: DurableObjectState, env: Env): ObjectInstance {
+function replayHost(id: string, state: DurableObjectState, env: Env, engines: ReplayEngines["Service"]): ObjectInstance {
   // Same concrete address as ReplayWake.at({id}), with no parameters. It is
   // intentionally local; only Sessions and Scores are ObjectLink services.
   class LocalWake extends Streamsy.wake<LocalWake>()("DoomV2/LocalWake", `doom/v2/replay-wake/${id}`, { params: {} }) {}
   const layer = (owner: DurableObjectState) => CheckpointStore.layer.pipe(
     Layer.provideMerge(DurableObjectStorage.layer(Streamsy.group(ReplayWake), { client: { storage: owner.storage } })),
+    Layer.provideMerge(Layer.succeed(ReplayEngines, engines)),
   );
   const Host = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof layer>>, Sessions | Scores>({
     app: Layer.mergeAll(wakeLink.routes, Http.routes(Streamsy.group(ReplayWake), { prefix: "/", access: "read" }),
       HttpRouter.add("POST", "/__init-replay", Effect.gen(function* () {
-        yield* (yield* ReplayWake).create({ id }, { ttlSeconds: 43200 });
+        const wake = yield* ReplayWake;
+        yield* wake.head({ id }).pipe(Effect.catchTag("StreamNotFound", () => wake.create({ id }, { expiresAt: absoluteExpiry() })));
         return HttpServerResponse.empty({ status: 204 });
       }).pipe(Effect.orDie))),
     layer, links: bindings => {
       const frames = framesLink.client(bindings.GAMES), scores = scoresLink.client(bindings.LOBBY);
       return [{ streams: [...frames.streams, ...scores.streams], layer: Layer.merge(frames.layer, scores.layer) }];
     },
-    wakeups: [ProjectionWakeup.attach(frameCounter, { triggers: [LocalWake] })],
+    wakeups: [ProjectionWakeup.attach(replayStats, { triggers: [LocalWake] }), ProjectionWakeup.attach(replayIdle, { triggers: [LocalWake] })],
   });
   return new Host(state, env);
 }
 // Bootstrap is outside identity-dependent acquisition, using only public DO and
 // StreamsyObject APIs. Once saved, identity selects one layer graph per lifetime.
 export class DoomReplay {
+  protected readonly engines: ReplayEngines["Service"];
   private identity?: string;
   private host?: ObjectInstance;
   private readonly ready: Promise<void>;
   constructor(private readonly owner: DurableObjectState, private readonly bindings: Env) {
+    this.engines = { cache: new Map(), create: async identity => (await serverEngine(bindings))(identity) };
     this.ready = owner.blockConcurrencyWhile(async () => { this.identity = await owner.storage.get<string>("doom-v2-session-id"); });
   }
   private acquire() {
     if (!this.identity) throw new Error("Replay not bootstrapped");
-    return this.host ??= replayHost(this.identity, this.owner, this.bindings);
+    return this.host ??= replayHost(this.identity, this.owner, this.bindings, this.engines);
   }
   async fetch(request: Request): Promise<Response> {
     await this.ready;

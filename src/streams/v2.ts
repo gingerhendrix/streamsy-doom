@@ -24,8 +24,17 @@ export const SessionRowSchema = Schema.Struct({
 export class LobbyStream extends Streamsy.state<LobbyStream>()("DoomV2/Lobby", "doom/v2/lobby", {
   params: {}, collections: { session: { schema: SessionRowSchema, key: "id" } },
 }) {}
+export const StatsRowSchema = Schema.Struct({
+  id: SessionId, tic: Schema.Number, updatedTic: Schema.Number,
+  health: Schema.Number, armor: Schema.Number, kills: Schema.Number, deaths: Schema.Number,
+  items: Schema.Number, secrets: Schema.Number, levelKills: Schema.Number, levelItems: Schema.Number, levelSecrets: Schema.Number,
+  levelTotalKills: Schema.Number, levelTotalItems: Schema.Number, levelTotalSecrets: Schema.Number,
+  episode: Schema.Number, map: Schema.Number, weapon: Schema.Number, ammo: Schema.Number,
+  alive: Schema.Boolean, live: Schema.Boolean, verified: Schema.Boolean,
+});
+export type StatsRow = typeof StatsRowSchema.Type;
 export class Scores extends Streamsy.state<Scores>()("DoomV2/Scores", "doom/v2/scores", {
-  params: {}, collections: { stats: { schema: Schema.Struct({ id: SessionId, tic: Schema.Number }), key: "id" } },
+  params: {}, collections: { stats: { schema: StatsRowSchema, key: "id" } },
 }) {}
 export const familyStreams = Streamsy.group(Sessions, Batches, SnapshotIndex, Snapshots);
 export const lobbyStreams = Streamsy.group(LobbyStream, Scores);

@@ -1,21 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { countFrames, type Counter } from "../../src/projection/counter";
+import { decodePages, initialStats } from "../../src/projection/stats";
 import { familyOf, isFamilyId, newSessionId, newForkId } from "../../src/streams/ids";
 import { concat, encode } from "../../src/streams/protocol";
 
-test("counter checkpoints survive every header/frame split and JSON serialization", () => {
-  const bytes = concat([encode({ formatVersion: 1, playerName: "Démon 👹" }), ...Array.from({ length: 19 }, () => new Uint8Array(9))]);
-  const initial: Counter = { header: false, tail: [], tic: 0 };
+test("decoder checkpoints survive every header/frame split and JSON serialization", () => {
+  const identity = { version: 2, buildId: "test", wadSha256: "test", skill: 3, episode: 1, map: 1 };
+  const bytes = concat([encode({ formatVersion: 1, ...identity, playerName: "Démon 👹" }), ...Array.from({ length: 19 }, () => new Uint8Array(9))]);
   for (let split = 0; split <= bytes.length; split++) {
-    const checkpoint = JSON.parse(JSON.stringify(countFrames(initial, [bytes.subarray(0, split)]))) as Counter;
-    expect(countFrames(checkpoint, [bytes.subarray(split)])).toEqual({ header: true, tail: [], tic: 19 });
+    const first = decodePages(initialStats(), [bytes.subarray(0, split)]);
+    const checkpoint = JSON.parse(JSON.stringify({ header: first.header, tail: first.tail }));
+    const second = decodePages(checkpoint, [bytes.subarray(split)]);
+    expect(first.frames.length + second.frames.length).toBe(19 * 9);
+    expect(second.tail).toEqual([]); expect(second.header).toEqual(identity);
   }
-  let checkpoint = initial;
-  for (const byte of bytes) checkpoint = JSON.parse(JSON.stringify(countFrames(checkpoint, [new Uint8Array([byte])])));
-  expect(checkpoint).toEqual({ header: true, tail: [], tic: 19 });
-  expect(() => countFrames(initial, [encode({ formatVersion: 2 })])).toThrow("Unsupported");
-  expect(() => countFrames(initial, [new Uint8Array(65537).fill(65)])).toThrow("header too large");
+  let checkpoint = { header: null as typeof identity | null, tail: [] as number[] }, count = 0;
+  for (const byte of bytes) {
+    const decoded = decodePages(checkpoint, [new Uint8Array([byte])]);
+    count += decoded.frames.length / 9;
+    checkpoint = JSON.parse(JSON.stringify({ header: decoded.header, tail: decoded.tail }));
+  }
+  expect(count).toBe(19);
+  expect(() => decodePages(initialStats(), [encode({ formatVersion: 2 })])).toThrow("Unsupported");
+  expect(() => decodePages(initialStats(), [new Uint8Array(65537).fill(65)])).toThrow("header too large");
 });
 test("IDs use the exact lowercase grammar and preserve family through grandchildren", () => {
   const root = newSessionId(), second = newSessionId(), child = newForkId(root), grandchild = newForkId(child);

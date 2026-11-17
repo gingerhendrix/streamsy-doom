@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import { absoluteExpiry } from "../../src/streams/protocol";
 import { Http } from "@streamsy/core";
 import { CheckpointStore, Projection } from "@streamsy/projection";
 import { allStreams, ReplayWake, Scores } from "../../src/streams/v2";
 import { isFamilyId } from "../../src/streams/ids";
-import { frameCounter } from "../../src/projection/counter";
+import { replayStats, replayIdle } from "../../src/projection/stats";
+import { ReplayEngines } from "../../src/projection/engines";
+import { serverEngine } from "./engine";
 import { Protocol, routes } from "@streamsy/core/protocol";
 import { BunStorage } from "@streamsy/storage/bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
@@ -25,7 +28,9 @@ export async function startHost(options: {
     client: { filename: options.database ?? "doom.sqlite" }, longPollTimeoutMs: options.longPollTimeoutMs ?? 20_000,
   });
   const storage = CheckpointStore.layer.pipe(Layer.provideMerge(Protocol.bind(protocol, allStreams).pipe(Layer.provideMerge(protocol))));
-  const runtime = ManagedRuntime.make(Projection.attach(frameCounter, { durable: true }).pipe(Layer.provideMerge(storage)));
+  let engineFactory: ReturnType<typeof serverEngine> | undefined;
+  const engines = Layer.succeed(ReplayEngines, { cache: new Map(), create: async identity => (await (engineFactory ??= serverEngine(options.wadPath)))(identity) });
+  const runtime = ManagedRuntime.make(Layer.merge(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines)));
   const context = await runtime.context();
   const cors = HttpRouter.cors({ exposedHeaders, maxAge: 0 });
   const legacy = HttpRouter.toWebHandler(routes({ prefix: "/", maxMessageSize: 2_000_000 }).pipe(
@@ -50,7 +55,8 @@ export async function startHost(options: {
           else {
             await runtime.runPromise(Effect.gen(function* () {
               yield* (yield* Scores).create({}, { ttlSeconds: 43200 });
-              yield* (yield* ReplayWake).create({ id }, { ttlSeconds: 43200 });
+              const wake = yield* ReplayWake;
+              yield* wake.head({ id }).pipe(Effect.catchTag("StreamNotFound", () => wake.create({ id }, { expiresAt: absoluteExpiry() })));
             }));
             response = new Response(null, { status: 204 });
           }
