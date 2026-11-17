@@ -8,7 +8,7 @@ export interface WadManifest {
   notices: string[];
 }
 
-export async function loadWad(manifestUrl = "/wad/manifest.json", request: typeof fetch = fetch): Promise<Uint8Array> {
+export async function loadWad(manifestUrl = "/wad/manifest.json", request: (url: string, init?: RequestInit) => Promise<Response> = fetch): Promise<Uint8Array> {
   const get = async (url: string) => {
     const response = await request(url, { cache: "no-store" });
     if (!response.ok) throw new Error(`WAD asset ${url}: HTTP ${response.status}`);
