@@ -28,6 +28,10 @@ await deleteSession(client, child.row.id);
 POSTs the entire frame batch, then persists the checkpoints. The default snapshot
 interval is 4200 tics. `append` only persists frames; callers using it directly
 use `SnapshotStore.write(engine.snapshot())` at their chosen boundaries.
+`append(frames, { publishLobby: false })` lets a browser publish the current
+`writer.row` through `Lobby.put` on a slower cadence; publish after queued writes
+and on end. Fork validation uses the persisted batch manifest, so a throttled
+lobby count does not reject a valid fork. The default still publishes per append.
 Call writer methods sequentially and use one writer per session. Expected-offset
 appends reject competing/stale writers. A failed network or metadata operation
 is surfaced immediately; writes are not retried automatically. A failed

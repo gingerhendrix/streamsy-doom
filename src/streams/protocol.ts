@@ -19,7 +19,7 @@ export const offsetOf = (response: Response) => {
   return value;
 };
 export class ProtocolClient {
-  constructor(readonly baseUrl: string, readonly fetcher: typeof fetch = fetch) {}
+  constructor(readonly baseUrl: string, readonly fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = (input, init) => fetch(input, init)) {}
   async request(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
     // Revalidate all growing streams, including first reads and repeated long polls.

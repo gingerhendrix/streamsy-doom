@@ -12,7 +12,7 @@ export class SessionWriter {
     if (!Number.isInteger(snapshotInterval) || snapshotInterval < 1) throw new Error("Invalid snapshot interval");
   }
   get tic() { return this.row.tickCount; }
-  async append(frames: Uint8Array[]) {
+  async append(frames: Uint8Array[], options: { publishLobby?: boolean } = {}) {
     if (this.busy) throw new Error("Writer already in use");
     if (!frames.length || frames.some(frame => frame.length !== 9)) throw new Error("Expected nonempty batch of 9-byte frames");
     uint32(this.tic + frames.length);
@@ -25,7 +25,7 @@ export class SessionWriter {
       this.row.tickCount = batch.endTic;
       this.batches.push(batch);
       await this.client.append(batchPath(this.row.id), JSON.stringify([{ batch }]), "application/json");
-      await new Lobby(this.client).put(this.row);
+      if (options.publishLobby !== false) await new Lobby(this.client).put(this.row);
       return batch;
     } finally { this.busy = false; }
   }
@@ -120,11 +120,12 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
 }) {
   uint32(tic);
   const lobby = new Lobby(client), parent = await lobby.get(parentId);
-  if (parent.status === "deleted" || tic > parent.tickCount) throw new Error("Invalid fork point");
+  if (parent.status === "deleted") throw new Error("Invalid fork point");
   const manifest = await client.json<Manifest>(batchPath(parentId));
   const headerOffset = manifest.find(record => record.headerOffset)?.headerOffset;
   if (!headerOffset) throw new Error("Missing header boundary");
   const batches = manifest.flatMap(record => record.batch ? [record.batch] : []);
+  if (tic > (batches.at(-1)?.endTic ?? 0)) throw new Error("Invalid fork point");
   const inside = batches.find(batch => batch.startTic < tic && tic < batch.endTic);
   const boundary = tic === 0 ? headerOffset : batches.find(batch => batch.endTic === tic)?.after;
   const offset = inside?.before ?? boundary;

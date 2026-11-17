@@ -172,7 +172,9 @@ test("fresh clients: exact boundary, tic zero, inherited partial-batch fork and 
     const identity = { version: 2, buildId: "test", wadSha256: "test", skill: 3, episode: 1, map: 1 };
     const writer = await createSession(client, { id: "boundaries", playerName: "Test", identity });
     await writer.append([new Uint8Array(9).fill(1), new Uint8Array(9).fill(2), new Uint8Array(9).fill(3)]);
-    await writer.append([new Uint8Array(9).fill(4), new Uint8Array(9).fill(5)]);
+    await writer.append([new Uint8Array(9).fill(4), new Uint8Array(9).fill(5)], { publishLobby: false });
+    expect((await new Lobby(client).get("boundaries")).tickCount).toBe(3);
+    // The manifest, rather than the deliberately stale lobby count, permits tic 5 forks.
     for (const tic of [0, 3, 5]) {
       await forkSession(client, "boundaries", tic, { id: `at-${tic}`, playerName: "Test" });
       expect((await new SessionReader(client, `at-${tic}`).catchUp()).frames.length).toBe(tic);
