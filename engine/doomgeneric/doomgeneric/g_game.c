@@ -21,6 +21,10 @@
 #include <stdlib.h>
 #include <math.h>
 
+#ifdef STREAMSY_WASM
+#include "doom_wasm.h"
+#endif
+
 #include "doomdef.h" 
 #include "doomkeys.h"
 #include "doomstat.h"
@@ -915,6 +919,9 @@ void G_Ticker (void)
 
 	    if (demoplayback) 
 		G_ReadDemoTiccmd (cmd); 
+#ifdef STREAMSY_WASM
+            if (i == consoleplayer) dg_ticcmd(cmd);
+#endif
 	    if (demorecording) 
 		G_WriteDemoTiccmd (cmd);
 	    

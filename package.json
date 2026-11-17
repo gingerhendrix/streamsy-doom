@@ -1,0 +1,14 @@
+{
+  "name": "streamsy-doom",
+  "private": true,
+  "type": "module",
+  "license": "GPL-2.0-or-later",
+  "scripts": {
+    "fetch-wad": "bun engine/scripts/fetch-wad.ts",
+    "build:engine": "bun engine/scripts/build.ts",
+    "test": "bun test engine/test"
+  },
+  "devDependencies": {
+    "fflate": "0.8.2"
+  }
+}

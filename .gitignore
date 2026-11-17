@@ -3,3 +3,5 @@ dist/
 .alchemy/
 *.wad
 .env
+engine/build/
+engine/data/

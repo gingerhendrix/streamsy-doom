@@ -195,6 +195,10 @@ void D_Display (void)
 		borderdrawcount = 3;
     }
 
+#ifdef STREAMSY_WASM
+    // A host must never wait for wall time or consume wipe RNG while rendering.
+    wipegamestate = gamestate;
+#endif
     // save the current screen if about to wipe
     if (gamestate != wipegamestate)
 		{
@@ -437,7 +441,9 @@ void D_DoomLoop (void)
 
     main_loop_started = true;
 
+#ifndef STREAMSY_WASM
     TryRunTics();
+#endif
 
     I_SetWindowTitle(gamedescription);
     I_GraphicsCheckCommandLine();
@@ -455,7 +461,9 @@ void D_DoomLoop (void)
         wipegamestate = gamestate;
     }
 
+#ifndef STREAMSY_WASM
     doomgeneric_Tick();
+#endif
 }
 
 
