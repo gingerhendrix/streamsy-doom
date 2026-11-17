@@ -2,6 +2,7 @@
 import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionRow, type SessionWriter, type Checkpoint } from "../../src/streams";
 import type { Engine } from "../../engine/src/engine.js";
 import { FixedStep, FrameQueue, Throttle } from "./timing";
+import { KeyboardControls } from "./keyboard";
 import { loadWad } from "../../src/wad";
 import "./style.css";
 
@@ -108,7 +109,7 @@ function renderRows(rows: SessionRow[]) {
 
 async function play(game: Engine, writer: SessionWriter) {
   await dispose();
-  stage("Playing", writer.row, `<p>Click the game to focus. Arrows move / turn · Ctrl fires · Space uses · Alt strafes · Shift runs · 1–7 selects a weapon. Blur pauses local play and releases keys.</p><button id="end">End game & return to lobby</button>`);
+  stage("Playing", writer.row, `<p>Click the game to focus. W/S move forward/back · A/D turn left/right · Space fires · Enter uses/interacts. Arrows also move/turn · Ctrl also fires · Alt strafes · Shift runs · Comma/Period strafe · 1–7 selects a weapon. Blur pauses local play and releases keys.</p><button id="end">End game & return to lobby</button>`);
   history.replaceState(null, "", `#watch/${writer.row.id}`);
   const canvas = document.querySelector<HTMLCanvasElement>("canvas")!;
   const store = new SnapshotStore(client, writer.row.id), throttle = new Throttle();
@@ -120,22 +121,10 @@ async function play(game: Engine, writer: SessionWriter) {
   });
   const clock = new FixedStep();
   const { runtime } = await assets!;
-  const keys = runtime.keys;
-  const mapping: Record<string, number> = { ArrowUp: keys.up, ArrowDown: keys.down, ArrowLeft: keys.left, ArrowRight: keys.right, ControlLeft: keys.fire, ControlRight: keys.fire, Space: keys.use, AltLeft: keys.strafe, AltRight: keys.strafe, ShiftLeft: keys.run, ShiftRight: keys.run, Comma: keys.strafeLeft, Period: keys.strafeRight };
-  for (let n = 1; n <= 7; n++) mapping[`Digit${n}`] = 48 + n;
-  const held = new Set<string>();
-  const release = () => { held.clear(); for (const code of new Set(Object.values(mapping))) game.key(code, false); clock.pause(); };
+  const keyboard = new KeyboardControls(runtime.keys, (code, down) => game.key(code, down));
+  const release = () => { keyboard.release(); clock.pause(); };
   release();
-  const key = (event: KeyboardEvent) => {
-    // Some browser automation and older keyboards omit physical code.
-    const fallback: Record<string, string> = { Control: "ControlLeft", Alt: "AltLeft", Shift: "ShiftLeft", " ": "Space", ",": "Comma", ".": "Period" };
-    const name = event.code || fallback[event.key] || (/^[1-7]$/.test(event.key) ? `Digit${event.key}` : event.key);
-    const code = mapping[name];
-    if (code === undefined || (document.activeElement !== canvas && event.type === "keydown")) return;
-    event.preventDefault();
-    if (event.type === "keydown") held.add(name); else held.delete(name);
-    game.key(code, [...held].some(heldKey => mapping[heldKey] === code));
-  };
+  const key = (event: KeyboardEvent) => keyboard.handle(event, document.activeElement === canvas);
   window.addEventListener("keydown", key); window.addEventListener("keyup", key);
   window.addEventListener("blur", release); canvas.addEventListener("blur", release);
   const tick = (now: number) => {

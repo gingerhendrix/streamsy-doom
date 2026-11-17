@@ -54,7 +54,7 @@ Freedoom is 28,795,076 bytes, above Cloudflare's [25 MiB static asset limit](htt
 
 ## Playing and watching
 
-Choose a name and skill, then New game (E1M1). Click the canvas for keyboard focus. Arrows move/turn, Ctrl fires, Space uses, Alt strafes, Shift runs, comma/period strafe, and 1–7 select weapons. Blur pauses local play and releases held keys. There is no audio. Use separate browser sessions/windows for a player and live observer.
+Choose a name and skill, then New game (E1M1). Click the canvas for keyboard focus. W and S move forward and back. A and D turn left and right. Space fires, and Enter uses doors and switches. Arrows also move and turn, and Ctrl also fires. Alt strafes, Shift runs, comma and period strafe, and 1–7 select weapons. Outside the canvas, Enter keeps its normal browser behavior for forms and buttons. Blur pauses local play and releases held keys. There is no audio. Use separate browser sessions/windows for a player and live observer.
 
 Watch follows the stream live. Release the timeline slider to seek; the snapshot-to-target range appears below it. Follow live catches up again. Fork here opens a child at the displayed tic and starts recording new inputs. End game drains pending writes and returns to the lobby. Delete appears for sessions created by that browser, remembered in localStorage. It removes the child's snapshots/index/manifest and hides its row; the binary session is retained until TTL. This ownership UI provides no authorization.
 
