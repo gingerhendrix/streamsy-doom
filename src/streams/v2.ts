@@ -18,9 +18,10 @@ export class Snapshots extends Streamsy.bytes<Snapshots>()("DoomV2/Snapshots", "
 export class ReplayWake extends Streamsy.wake<ReplayWake>()("DoomV2/ReplayWake", "doom/v2/replay-wake/:id", { params }) {}
 export const SessionRowSchema = Schema.Struct({
   id: SessionId, playerName: Schema.String, skill: Schema.Number, episode: Schema.Number, map: Schema.Number,
-  createdAt: Schema.String, status: Schema.Literals(["playing", "ended", "deleted"]), tickCount: Schema.Number,
+  createdAt: Schema.String, ended: Schema.Boolean,
   forkedFrom: Schema.NullOr(SessionId), forkTic: Schema.NullOr(Schema.Number),
 });
+export type SessionMetadata = typeof SessionRowSchema.Type;
 export class LobbyStream extends Streamsy.state<LobbyStream>()("DoomV2/Lobby", "doom/v2/lobby", {
   params: {}, collections: { session: { schema: SessionRowSchema, key: "id" } },
 }) {}

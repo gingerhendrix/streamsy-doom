@@ -26,7 +26,7 @@ export class SessionWriter {
       this.row.tickCount = batch.endTic;
       this.batches.push(batch);
       await this.client.append(batchPath(this.row.id), JSON.stringify([{ batch }]), "application/json");
-      if (options.publishLobby !== false) await new Lobby(this.client).put(this.row);
+      if (!isFamilyId(this.row.id) && options.publishLobby !== false) await new Lobby(this.client).put(this.row);
       return batch;
     } finally { this.busy = false; }
   }
@@ -159,5 +159,5 @@ export async function deleteSession(client: ProtocolClient, id: string) {
   if (row.status === "deleted") return;
   await new SnapshotStore(client, id).delete();
   await client.remove(batchPath(id));
-  await lobby.put({ ...row, status: "deleted" });
+  await lobby.delete(row);
 }

@@ -36,7 +36,7 @@ const initScores = HttpRouter.add("POST", "/__init-scores", Effect.gen(function*
 const lobbyLayer = (state: DurableObjectState) => DurableObjectStorage.layer(lobbyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 });
 export const DoomLobby = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof lobbyLayer>>>({
   app: Layer.mergeAll(Http.routes(lobbyStreams, { prefix: "/", access: stream => stream === Scores ? "read" : "full" }), scoresLink.routes, initScores),
-  layer: lobbyLayer,
+  layer: lobbyLayer, live: { websocket: true },
 });
 
 function replayHost(id: string, state: DurableObjectState, env: Env, engines: ReplayEngines["Service"]): ObjectInstance {

@@ -127,7 +127,8 @@ for (const v2 of [false, true]) test.skipIf(missing.length > 0)(`real WASM (${v2
     }
     expect((await client.request(sessionPath(childId), { method: "HEAD" })).status).toBe(200); // TTL policy
     expect((await client.request(snapshotPath(parent, 3000), { method: "HEAD" })).status).toBe(200);
-    expect(await new Lobby(client).get(childId)).toMatchObject({ status: "deleted", forkedFrom: parent, forkTic, tickCount: forkTic + 53 });
+    if (v2) await expect(new Lobby(client).get(childId)).rejects.toThrow("Session missing");
+    else expect(await new Lobby(client).get(childId)).toMatchObject({ status: "deleted", forkedFrom: parent, forkTic, tickCount: forkTic + 53 });
     await writer.end();
     expect((await new Lobby(client).get(parent)).status).toBe("ended");
     const unexpected = requests.filter(request => request.status >= 400 && !(request.method === "HEAD" && request.status === 404));

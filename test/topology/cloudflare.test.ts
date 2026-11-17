@@ -6,6 +6,7 @@ import { bundleWorker } from "../../scripts/bundle-worker";
 import { recording, createHeadless } from "../helpers/recording";
 import { initialStats, replayPages } from "../../src/projection/stats";
 import { concat, encode } from "../../src/streams/protocol";
+import type { StateEvent } from "../../src/streams/state";
 import type { StatsRow } from "../../src/streams/v2";
 import { ProtocolClient, createSession, forkSession, SessionReader, SnapshotStore, deleteSession, sessionPath, batchPath, indexPath, snapshotPath, familyOf, isFamilyId } from "../../src/streams";
 const scratch = process.env.DOOM_TEST_SCRATCH ?? "/home/gareth/Documents/Personal/scratch/2026-11-17-doom-cross-object-build/batch2";
@@ -306,3 +307,42 @@ test("workerd: a lost score response retries producer output without duplicate r
     expect((await h.score(writer.row.id, 300, false)).verified).toBe(true);
   } finally { await h.stop(); }
 }, 15000);
+
+test("workerd: browser lobby WebSockets and long-poll receive replay-chain scores; public writes/internal routes fail", async () => {
+  const { followJson, StateRows } = await import("../../src/streams");
+  const h = await harness(), abort = new AbortController();
+  const tasks: Promise<void>[] = [];
+  try {
+    const browser = new ProtocolClient((await h.runtime().ready).href);
+    const writer = await createSession(browser, { playerName: "Live lobby", identity });
+    const metadata = new StateRows<import("../../src/streams/v2").SessionMetadata>("session");
+    const socketScores = new StateRows<StatsRow>("stats"), pollScores = new StateRows<StatsRow>("stats");
+    const modes: string[] = [];
+    tasks.push(followJson<StateEvent<import("../../src/streams/v2").SessionMetadata>>(browser, "doom/v2/lobby", {
+      signal: abort.signal, onBatch: events => metadata.apply(events), onTransport: mode => modes.push(`session:${mode}`),
+    }));
+    for (const [state, websocket] of [[socketScores, true], [pollScores, false]] as const) {
+      tasks.push(followJson<StateEvent<StatsRow>>(browser, "doom/v2/scores", {
+        signal: abort.signal, websocket, onBatch: events => state.apply(events), onTransport: mode => modes.push(`${websocket ? "socket" : "poll"}:${mode}`),
+      }));
+    }
+    await until(async () => modes.includes("session:websocket") && modes.includes("socket:websocket") && modes.includes("poll:long-poll") ? true : undefined, "live subscriptions");
+    await writer.append(frames.slice(0, 175));
+    await until(async () => socketScores.rows.get(writer.row.id)?.tic === 175 && pollScores.rows.get(writer.row.id)?.tic === 175 ? true : undefined, "live replay score");
+    expect(socketScores.rows.get(writer.row.id)).toMatchObject({ verified: true, health: 100, kills: 0 });
+    expect(pollScores.rows.get(writer.row.id)).toEqual(socketScores.rows.get(writer.row.id));
+    await writer.end();
+    await until(async () => metadata.rows.get(writer.row.id)?.ended ? true : undefined, "live end metadata");
+    const forged = [{ type: "stats", key: writer.row.id, value: { ...socketScores.rows.get(writer.row.id), kills: 999 }, headers: { operation: "upsert" } }];
+    await expect(browser.append("doom/v2/scores", JSON.stringify(forged), "application/json")).rejects.toMatchObject({ status: 405 });
+    for (const path of ["__scores/doom/v2/scores", `__frames/${sessionPath(writer.row.id)}`, `__wake/doom/v2/replay-wake/${writer.row.id}`, "__init-scores", `__bootstrap/${writer.row.id}`]) {
+      for (const method of ["GET", "POST"]) expect((await fetch(new URL(path, browser.baseUrl), { method })).status).toBe(404);
+      expect((await h.send(path, { headers: { Upgrade: "websocket" } })).status).toBe(404);
+    }
+    await deleteSession(browser, writer.row.id);
+    await until(async () => !metadata.rows.has(writer.row.id) ? true : undefined, "live State delete");
+    // A server-only orphan score cannot resurrect a deleted session in the UI's metadata join.
+    expect(socketScores.rows.has(writer.row.id)).toBe(true);
+    console.log("MEASURED local workerd: session and score WebSocket upgrades succeeded; both WebSocket and long-poll received replay score tic 175, then live end/delete metadata");
+  } finally { abort.abort(); await Promise.all(tasks); await h.stop(); }
+}, 30000);

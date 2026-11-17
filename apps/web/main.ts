@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionRow, type SessionWriter, type Checkpoint } from "../../src/streams";
+import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionRow, type SessionWriter, type Checkpoint, StateRows, followJson, sessionRow, isFamilyId, type StateEvent } from "../../src/streams";
+import type { SessionMetadata, StatsRow } from "../../src/streams/v2";
 import type { Engine } from "../../engine/src/engine.js";
-import { FixedStep, FrameQueue, Throttle } from "./timing";
+import { FixedStep, FrameQueue } from "./timing";
 import { KeyboardControls } from "./keyboard";
 import { loadWad } from "../../src/wad";
 import "./style.css";
@@ -45,7 +46,7 @@ function paint(game: Engine) {
   canvas.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(game.render()), 320, 200), 0, 0);
 }
 function stage(title: string, row: SessionRow, controls: string) {
-  main.innerHTML = `<div class="toolbar"><h2 id="heading"></h2><button id="leave">Lobby</button></div><p id="session"></p><div class="stage"><canvas width="320" height="200" tabindex="0" aria-label="Doom game; click to focus keyboard"></canvas></div><div class="metrics" aria-live="off" id="metrics"></div>${controls}`;
+  main.innerHTML = `<div class="toolbar"><h2 id="heading"></h2><button id="leave">Lobby</button></div><p id="session"></p><div class="stage"><canvas width="320" height="200" tabindex="0" aria-label="Doom game; click to focus keyboard"></canvas></div><div class="metrics" aria-live="off" id="metrics"></div><p class="score-hud" id="score-hud"></p>${controls}`;
   document.querySelector("#heading")!.textContent = title;
   document.querySelector("#session")!.textContent = `${row.playerName} · Skill ${row.skill} · ${row.id}${row.forkedFrom ? ` · Fork of ${row.forkedFrom} at tic ${row.forkTic}` : ""}`;
   button("leave", showLobby);
@@ -54,7 +55,7 @@ function stage(title: string, row: SessionRow, controls: string) {
 async function showLobby() {
   await dispose(); dispose = async () => {};
   history.replaceState(null, "", location.pathname);
-  main.innerHTML = `<section><h2>Start a new timeline</h2><p>Play, watch live, or rewind and take the game in another direction.</p><form><label>Player name<input id="name" maxlength="40" value="Player" required></label><label>Skill<select id="skill"><option value="1">1 · I'm too young to die</option><option value="2">2 · Hey, not too rough</option><option value="3" selected>3 · Hurt me plenty</option><option value="4">4 · Ultra-Violence</option><option value="5">5 · Nightmare!</option></select></label><button class="primary">New game</button></form></section><section><h2>Sessions <span id="count"></span></h2><div id="sessions">Loading lobby…</div></section>`;
+  main.innerHTML = `<section><h2>Start a new timeline</h2><p>Play, watch live, or rewind and take the game in another direction.</p><form><label>Player name<input id="name" maxlength="40" value="Player" required></label><label>Skill<select id="skill"><option value="1">1 · I'm too young to die</option><option value="2">2 · Hey, not too rough</option><option value="3" selected>3 · Hurt me plenty</option><option value="4">4 · Ultra-Violence</option><option value="5">5 · Nightmare!</option></select></label><button class="primary">New game</button></form></section><section><h2>Sessions <span id="count"></span></h2><p id="transport">Connecting…</p><div id="sessions">Loading lobby…</div><p class="hint">Scores publish on stat changes or every five seconds of play. ¹Age is time since this tab received the score at its projected tic; initial history has no server timestamp. Watch shows lag in tics. New tabs replay retained lobby history.</p></section><section id="legacy-section" hidden><h2>Legacy sessions</h2><p>Recordings from the earlier build · server stats unavailable</p><div id="legacy-sessions"></div></section>`;
   document.querySelector("form")!.addEventListener("submit", event => {
     event.preventDefault();
     void action(async () => {
@@ -70,39 +71,65 @@ async function showLobby() {
   });
   const abort = new AbortController();
   dispose = async () => { abort.abort(); };
-  // Fold live rows from their real next offset; never re-read a cached lobby head.
+  const sessions = new StateRows<SessionMetadata>("session"), scores = new StateRows<StatsRow>("stats");
+  const legacy = new Map<string, SessionRow>(), transports = new Map<string, string>();
+  const received = new Map<string, number>();
+  const render = () => {
+    if (abort.signal.aborted) return;
+    renderRows([...sessions.rows.values()].map(sessionRow), scores.rows, false, received);
+    renderRows([...legacy.values()].filter(row => row.status !== "deleted"), new Map(), true);
+  };
   void (async () => {
     await lobby.init();
-    const rows = new Map<string, SessionRow>();
-    await Promise.all(["doom/lobby", "doom/v2/lobby"].map(async path => {
-      let offset = "-1", cursor: string | undefined, live = false;
-      while (!abort.signal.aborted) {
-        const batch = await client.read(path, offset, live, abort.signal, cursor);
-        if (abort.signal.aborted) break;
-        const events = JSON.parse(new TextDecoder().decode(batch.bytes) || "[]");
-        for (const event of events) {
-          if (path === "doom/lobby") rows.set(event.id, event);
-          else if (event.headers.operation === "delete") rows.delete(event.key);
-          else rows.set(event.key, event.value);
-        }
-        offset = batch.offset; cursor = batch.cursor; live = batch.upToDate;
-        renderRows([...rows.values()].filter(row => row.status !== "deleted").sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
-      }
-    }));
+    if (abort.signal.aborted) return;
+    await Promise.all([
+      followJson<StateEvent<SessionMetadata>>(client, "doom/v2/lobby", { signal: abort.signal, onBatch: events => { sessions.apply(events); render(); }, onTransport: mode => transport("Sessions", mode) }),
+      followJson<StateEvent<StatsRow>>(client, "doom/v2/scores", { signal: abort.signal, onBatch: events => { scores.apply(events); for (const event of events) if (event.key) received.set(event.key, Date.now()); render(); }, onTransport: mode => transport("Scores", mode) }),
+      followJson<SessionRow>(client, "doom/lobby", { signal: abort.signal, websocket: false, onBatch: events => { for (const row of events) legacy.set(row.id, row); render(); } }),
+    ]);
   })().catch(error => { if (!abort.signal.aborted) report(error); });
+  const ageTimer = setInterval(() => {
+    for (const node of document.querySelectorAll<HTMLElement>("[data-score-received]")) {
+      node.textContent = `Seen ${Math.floor((Date.now() - Number(node.dataset.scoreReceived)) / 1000)}s ago · tic ${node.dataset.scoreTic}`;
+    }
+  }, 1000);
+  dispose = async () => { abort.abort(); clearInterval(ageTimer); };
+  function transport(stream: string, mode: string) {
+    if (abort.signal.aborted) return;
+    transports.set(stream, mode);
+    document.querySelector("#transport")!.textContent = [...transports].map(([name, mode]) => `${name}: ${mode}`).join(" · ");
+  }
 }
-function renderRows(rows: SessionRow[]) {
-  const container = document.querySelector("#sessions")!; container.replaceChildren();
-  document.querySelector("#count")!.textContent = `(${rows.length})`;
+function scoreCells(score?: StatsRow) {
+  return [score ? `E${score.episode}M${score.map}` : "—", ...[score?.health, score?.armor, score?.kills, score?.deaths].map(value => value === undefined ? "—" : String(value))];
+}
+function verification(score?: StatsRow) { return !score ? "Pending" : score.verified ? "Verified" : "Drift · unverified"; }
+function renderRows(rows: SessionRow[], scores: ReadonlyMap<string, StatsRow>, legacy = false, received = new Map<string, number>()) {
+  rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const container = document.querySelector(legacy ? "#legacy-sessions" : "#sessions")!; container.replaceChildren();
+  if (legacy) (document.querySelector("#legacy-section") as HTMLElement).hidden = !rows.length;
+  else document.querySelector("#count")!.textContent = `(${rows.length})`;
   if (!rows.length) { container.append(el("p", "No sessions yet. Start the first game.")); return; }
   const table = document.createElement("table"), head = document.createElement("tr");
-  for (const label of ["Player / timeline", "Status", "Tics", "Actions"]) head.append(el("th", label));
+  for (const label of legacy ? ["Player / timeline", "Status", "Tics", "Actions"] : ["Player / timeline", "Map", "Health", "Armor", "Kills", "Deaths", "Verification", "Live", "Projection age¹", "Actions"]) head.append(el("th", label));
   table.append(head);
   for (const row of rows) {
-    const tr = document.createElement("tr"), name = document.createElement("td");
-    name.append(el("strong", row.playerName), el("br", ""), el("code", row.id.slice(0, 8)));
-    if (row.forkedFrom) name.append(el("p", `Forked from ${row.forkedFrom.slice(0, 8)} at ${row.forkTic}`));
-    tr.append(name, el("td", row.status), el("td", String(row.tickCount)));
+    const tr = document.createElement("tr"), name = document.createElement("td"), score = scores.get(row.id);
+    tr.dataset.id = row.id;
+    name.append(el("strong", row.playerName), el("br", ""), el("code", isFamilyId(row.id) ? row.id.slice(33, 41) : row.id.slice(0, 8)));
+    if (row.forkedFrom) name.append(el("p", `Forked at ${row.forkTic}`));
+    tr.append(name);
+    if (legacy) tr.append(el("td", row.status), el("td", String(row.tickCount)));
+    else {
+      for (const text of scoreCells(score)) tr.append(el("td", text));
+      const badge = el("td", verification(score)); badge.className = !score ? "pending" : score.verified ? "verified" : "unverified";
+      const age = el("td", "Awaiting replay");
+      if (score) {
+        age.dataset.scoreReceived = String(received.get(row.id) ?? Date.now()); age.dataset.scoreTic = String(score.updatedTic);
+        age.textContent = `Seen ${Math.floor((Date.now() - Number(age.dataset.scoreReceived)) / 1000)}s ago · tic ${score.updatedTic}`;
+      }
+      tr.append(badge, el("td", row.status === "ended" ? "Ended" : score?.live ? "● Live" : score ? "○ Idle" : "Pending"), age);
+    }
     const controls = document.createElement("td"), watchButton = el("button", "Watch");
     watchButton.addEventListener("click", () => void action(() => watch(row.id))); controls.append(watchButton);
     if (owned.has(row.id)) {
@@ -119,12 +146,11 @@ async function play(game: Engine, writer: SessionWriter) {
   stage("Playing", writer.row, `<p>Click the game to focus. W/S move forward/back · A/D turn left/right · Space fires · Enter uses/interacts. Arrows also move/turn · Ctrl also fires · Alt strafes · Shift runs · Comma/Period strafe · 1–7 selects a weapon. Blur pauses local play and releases keys.</p><button id="end">End game & return to lobby</button>`);
   history.replaceState(null, "", `#watch/${writer.row.id}`);
   const canvas = document.querySelector<HTMLCanvasElement>("canvas")!;
-  const store = new SnapshotStore(client, writer.row.id), throttle = new Throttle();
+  const store = new SnapshotStore(client, writer.row.id);
   let snapshotTic = (await store.entries()).at(-1)?.tic ?? 0, stopped = false, raf = 0;
   const queue = new FrameQueue<Checkpoint>(async (frames, checkpoints) => {
     await writer.append(frames, { publishLobby: false });
     for (const checkpoint of checkpoints) { await store.write(checkpoint); snapshotTic = checkpoint.tic; }
-    if (throttle.due(performance.now())) await lobby.put(writer.row);
   });
   const clock = new FixedStep();
   const { runtime } = await assets!;
@@ -170,6 +196,10 @@ async function watch(id: string) {
   let following = true, seeking = false, stopped = false, raf = 0;
   info.textContent = `Snapshot ${initial.snapshotTic} → tic ${game.tic}`;
   const abort = new AbortController();
+  const scores = new StateRows<StatsRow>("stats");
+  const hud = document.querySelector("#score-hud")!;
+  hud.textContent = isFamilyId(id) ? "Server replay: awaiting stats…" : "Legacy recording · server stats unavailable";
+  if (isFamilyId(id)) void followJson<StateEvent<StatsRow>>(client, "doom/v2/scores", { signal: abort.signal, onBatch: events => { scores.apply(events); } }).catch(error => { if (!abort.signal.aborted) report(error); });
   dispose = async () => { stopped = true; abort.abort(); cancelAnimationFrame(raf); };
   void (async () => { for await (const _ of reader.follow(abort.signal)) { /* reader retains the live frames; paint loop replays them */ } })().catch(error => { if (!abort.signal.aborted) { following = false; report(error); } });
   const tick = () => {
@@ -177,6 +207,8 @@ async function watch(id: string) {
     try {
       if (following && !seeking) for (let n = 0; game.tic < reader.frames.length && n < 140; n++) game.step(reader.frames[game.tic]);
       if (!seeking) paint(game);
+      const score = scores.rows.get(id);
+      if (isFamilyId(id)) hud.textContent = score ? `Server replay · E${score.episode}M${score.map} · Health ${score.health} · Armor ${score.armor} · Kills ${score.kills} · Deaths ${score.deaths} · ${verification(score)} · ${score.live ? "Live" : "Idle"} · Projected ${score.tic} · Lag ${Math.max(0, reader.frames.length - score.tic)} tics (updated ${score.updatedTic})` : "Server replay: awaiting stats…";
       scrub.max = String(reader.frames.length);
       if (following) scrub.value = String(game.tic);
       document.querySelector("#metrics")!.textContent = `Tic ${game.tic} / ${reader.frames.length} · Live lag ${reader.frames.length - game.tic} tics · ${following ? "Following live" : "Scrubbed"}`;

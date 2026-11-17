@@ -28,10 +28,10 @@ await deleteSession(client, child.row.id);
 POSTs the entire frame batch, then persists the checkpoints. The default snapshot
 interval is 4200 tics. `append` only persists frames; callers using it directly
 use `SnapshotStore.write(engine.snapshot())` at their chosen boundaries.
-`append(frames, { publishLobby: false })` lets a browser publish the current
-`writer.row` through `Lobby.put` on a slower cadence; publish after queued writes
-and on end. Fork validation uses the persisted batch manifest, so a throttled
-lobby count does not reject a valid fork. The default still publishes per append.
+V2 frame appends write no lobby progress; `writer.tic` stays local and server
+scores own published progress. Legacy callers retain per-append lobby writes
+unless `publishLobby: false` is supplied. Fork validation uses the persisted
+batch manifest, so no browser progress heartbeat is needed.
 Call writer methods sequentially and use one writer per session. Expected-offset
 appends reject competing/stale writers. A failed network or metadata operation
 is surfaced immediately; writes are not retried automatically. A failed
@@ -66,7 +66,7 @@ recording; existing legacy IDs keep their original paths, including native forks
 | `doom/v2/snapshot-index/:id` | unchanged binary index | `game:<family>` |
 | `doom/v2/snapshots/:id/:tic` | unchanged gzip snapshot | `game:<family>` |
 | `doom/v2/replay-wake/:id` | State wake rows, publicly read-only | `replay:<id>` |
-| `doom/v2/lobby` | State `session` collection, current SessionRow fields | `lobby:v2` |
+| `doom/v2/lobby` | State `session` metadata (identity/settings, player, lineage, createdAt, ended; no progress) | `lobby:v2` |
 | `doom/v2/scores` | State `stats` collection, server replay fields below, publicly read-only | `lobby:v2` |
 
 Declarations in `v2.ts` use the published Streamsy 0.12.0 APIs. Cloudflare links
@@ -90,11 +90,21 @@ publication. An engine cache miss replays inputs from zero to the checkpoint;
 player snapshots never enter score recovery. Forks include inherited stats.
 Bun attaches the same projections locally. Reserved `/__…` mounts are never public.
 
-`Lobby` folds both namespaces for compatibility, including a missing namespace.
-The browser follows both while keeping its existing table. For this batch it
-continues publishing client tic counts/status in session metadata. Server-derived stats live separately in scores. Delete still removes snapshots,
-index and manifest and writes a deleted session row; frame history stays until
-expiry. Identity tombstones/checkpoints have no application garbage collector yet.
+`Lobby` folds both namespaces, including a missing namespace. V2 writes only the
+`session` collection on create, fork and end, and a State delete on removal.
+The browser joins it with server-owned `stats`, hides scores without session
+metadata, and lists legacy recordings separately. `StateRows` folds upserts,
+partial updates, deletes, resets and snapshot controls. `followJson` catches up
+via HTTP and follows Cloudflare lobby/scores over `streamsy-live.v1` WebSockets,
+with long-poll fallback on unsupported/failed upgrades. Binary batches are applied
+only at their control frame; reconnects retain the last confirmed opaque offset.
+Watch shows server scores and lag against the input tics it has read.
+
+New tabs replay retained lobby and score history from `-1`. There is no server
+snapshot/value route. Neither stream is a projection input, so their existing
+12-hour sliding TTL remains; continuously active readers can retain growing
+history. Observed score age starts on receipt in this tab, since `updatedTic`
+is a tic counter, not a wall-clock timestamp. Initial historical age is unknown.
 
 Workerd topology tests build only the Worker and use no cloud credentials. Test
 bundles, SQLite state and logs go under the batch scratch directory; override its
@@ -150,8 +160,9 @@ in a reused browser. A reader advances using returned offsets/cursors. Index and
 lobby folds re-read with this cache policy and paginate until up-to-date; they do
 not trust a cached first response. Offsets remain opaque throughout.
 
-Delete removes that session's snapshots, index and batch manifest, then marks its
-lobby row deleted. Repeated delete is harmless once marked. The binary session
+Delete removes that session's snapshots, index and batch manifest, then deletes its
+v2 State session row (legacy keeps its deleted tombstone). Scores are publicly
+read-only, so stale score rows can remain without visible session metadata. The binary session
 stays readable until TTL; a deleted session cannot be forked via this API. Parent
 snapshots remain readable after deleting child snapshot forks. `writer.end()`
 marks the lobby row ended; it does not close the binary stream.
