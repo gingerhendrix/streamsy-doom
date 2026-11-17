@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { testScratch } from "../helpers/scratch";
 import { Miniflare } from "miniflare";
 import { bundleWorker } from "../../scripts/bundle-worker";
 import { prepareRecording } from "../../scripts/loadtest/recording";
 import { runScenario, validate, percentiles, summarize, type Result, type Options, type Scenario } from "../../scripts/loadtest/runner";
 import { ProtocolClient, Lobby, createSession, deleteSession, sessionPath, batchPath, indexPath } from "../../src/streams";
-const scratch = process.env.DOOM_TEST_SCRATCH ?? "/home/gareth/Documents/Personal/scratch/2026-11-17-doom-cross-object-build/batch4";
+const scratch = await testScratch("loadtest");
 const fixture = await prepareRecording(400);
 const options = (target: string, scenario: Scenario): Options => ({ target, scenario, players: 2, tics: 20, depth: 2,
   idleMs: 0, histories: [35, 175], followers: scenario === "lobby" ? 3 : 1, realtime: false, timeoutMs: 25000, scoreTimeoutMs: 10000 });
@@ -26,7 +27,6 @@ test("loadtest validates binding limits before touching a target and uses neares
 
 });
 test("loadtest scenarios run against real workerd with engine replay, socket fallback and isolated cleanup", async () => {
-  await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(`${scratch}/loadtest-`);
   const scriptPath = await bundleWorker("test/topology/probe-worker.ts", `${root}/bundle`);
   const start = (port?: number) => new Miniflare({ rootPath: root, modulesRoot: `${root}/bundle`,

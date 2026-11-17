@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { testScratch } from "./helpers/scratch";
 import { Miniflare } from "miniflare";
 import { bundleWorker } from "../scripts/bundle-worker";
 import { recording, createHeadless } from "./helpers/recording";
 import { concat } from "../src/streams/protocol";
 import type { EngineStats } from "../engine/src/engine.js";
-const scratch = process.env.DOOM_TEST_SCRATCH ?? "/home/gareth/Documents/Personal/scratch/2026-11-17-doom-cross-object-build/batch2";
+const scratch = await testScratch("engine");
 const log = await recording(22000);
 
 test("headless stats match browser through deaths, restarts and reuse of the shared baseline", async () => {
@@ -35,7 +36,6 @@ test("headless stats match browser through deaths, restarts and reuse of the sha
 });
 
 test("workerd headless engine starts under nodejs_compat, matches Bun, and measures replay", async () => {
-  await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(`${scratch}/engine-workerd-`);
   const scriptPath = await bundleWorker("test/helpers/engine-worker.ts", `${root}/bundle`);
   const mf = new Miniflare({ modulesRoot: `${root}/bundle`,

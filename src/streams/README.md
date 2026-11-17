@@ -108,9 +108,9 @@ history. Observed score age starts on receipt in this tab, since `updatedTic`
 is a tic counter, not a wall-clock timestamp. Initial historical age is unknown.
 
 Workerd topology tests build only the Worker and use no cloud credentials. Test
-bundles, SQLite state and logs go under the batch scratch directory; override its
-location with `DOOM_TEST_SCRATCH`. The restart test explicitly reacquires the
-objects, which restores pending alarms; it does not prove autonomous crash repair.
+bundles, SQLite state and logs use disposable temporary directories that are
+removed after each suite. Set `DOOM_TEST_SCRATCH` to retain evidence under that root.
+The restart test explicitly reacquires the objects, which restores pending alarms; it does not prove autonomous crash repair.
 
 ## Stored paths and formats
 

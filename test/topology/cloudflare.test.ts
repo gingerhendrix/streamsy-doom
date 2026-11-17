@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { testScratch } from "../helpers/scratch";
 import { Miniflare } from "miniflare";
 import { bundleWorker } from "../../scripts/bundle-worker";
 import { recording, createHeadless } from "../helpers/recording";
@@ -9,7 +10,7 @@ import { concat, encode } from "../../src/streams/protocol";
 import type { StateEvent } from "../../src/streams/state";
 import type { StatsRow } from "../../src/streams/v2";
 import { ProtocolClient, createSession, forkSession, SessionReader, SnapshotStore, deleteSession, sessionPath, batchPath, indexPath, snapshotPath, familyOf, isFamilyId } from "../../src/streams";
-const scratch = process.env.DOOM_TEST_SCRATCH ?? "/home/gareth/Documents/Personal/scratch/2026-11-17-doom-cross-object-build/batch2";
+const scratch = await testScratch("topology");
 const binary = { "Content-Type": "application/octet-stream" };
 const { identity, frames } = await recording(300, false);
 const until = async <A>(probe: () => Promise<A | undefined>, label: string): Promise<A> => {
@@ -18,7 +19,6 @@ const until = async <A>(probe: () => Promise<A | undefined>, label: string): Pro
 };
 type Score = { key: string; value: StatsRow };
 async function harness() {
-  await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(`${scratch}/workerd-`);
   const scriptPath = await bundleWorker("test/topology/probe-worker.ts", `${root}/bundle`);
   const start = () => new Miniflare({ rootPath: root, modulesRoot: `${root}/bundle`,
