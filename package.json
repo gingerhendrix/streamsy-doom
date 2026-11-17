@@ -15,7 +15,8 @@
     "build:cf": "bun run build:engine && bun run build:web && bun scripts/build-cf.ts",
     "dev:cf": "bun scripts/dev-cf.ts",
     "deploy:cf": "cd apps/host-cloudflare && alchemy deploy --stage test --profile default",
-    "destroy:cf": "cd apps/host-cloudflare && alchemy destroy --stage test --profile default"
+    "destroy:cf": "cd apps/host-cloudflare && alchemy destroy --stage test --profile default",
+    "loadtest": "bun scripts/loadtest/main.ts"
   },
   "devDependencies": {
     "@alchemy.run/cloudflare": "2.0.0-beta.85",
