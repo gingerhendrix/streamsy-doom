@@ -2,6 +2,7 @@
 import { DurableState } from "@streamsy/core";
 import { CheckpointStore, Commit, Projection } from "@streamsy/projection";
 import { Clock, Effect, Option, Schema, Stream } from "effect";
+import { statNames } from "../../engine/src/stats.js";
 import type { EngineStats } from "../../engine/src/engine.js";
 import type { HeadlessEngine } from "../../engine/src/headless";
 import { concat } from "../streams/protocol";
@@ -9,10 +10,7 @@ import { Sessions, Scores, SessionId, StatsRowSchema, type StatsRow } from "../s
 import { ReplayEngines } from "./engines";
 const Identity = Schema.Struct({ version: Schema.Number, buildId: Schema.String, wadSha256: Schema.String,
   skill: Schema.Number, episode: Schema.Number, map: Schema.Number });
-const EngineStatsSchema = Schema.Struct(Object.fromEntries([
-  "tic", "gamestate", "episode", "map", "leveltime", "playerstate", "health", "armor", "kills", "items", "secrets",
-  "totalKills", "totalItems", "totalSecrets", "weapon", "ammo",
-].map(key => [key, Schema.Number])) as Record<keyof EngineStats, typeof Schema.Number>);
+const EngineStatsSchema = Schema.Struct(Object.fromEntries(statNames.map(key => [key, Schema.Number])) as Record<keyof EngineStats, typeof Schema.Number>);
 export const StatsState = Schema.Struct({
   header: Schema.NullOr(Identity), tail: Schema.Array(Schema.Number), tic: Schema.Number,
   last: Schema.NullOr(EngineStatsSchema), row: Schema.NullOr(StatsRowSchema), published: Schema.String,

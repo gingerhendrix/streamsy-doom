@@ -134,6 +134,8 @@ file; actual reads use the existing positional WAD adapter. There is no second
 MEMFS WAD copy and no per-engine snapshot baseline. `reset(identity)` reuses the
 heap and trusted pre-init baseline; `step(frame)` returns false on RNG drift and
 throws for malformed commands. Neither operation accepts player snapshots.
+`engine/src/stats.js` defines the shared `_dg_stats()` layout and reader without
+loading either engine adapter. The checkpoint schema uses those same field names.
 `stats()` returns the same named values as the browser; `ammo` currently means
 bullets (`player.ammo[0]`). Engine kill/item/secret counts reset on level restart.
 

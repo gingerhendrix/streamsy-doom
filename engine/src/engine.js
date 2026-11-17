@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // This adapter uses only standard JS APIs and runs in browsers, workers and Bun.
+import { readStats } from "./stats.js";
+export { statNames, readStats } from "./stats.js";
 export const keys = Object.freeze({
   up: 0xad, down: 0xaf, left: 0xac, right: 0xae,
   strafeLeft: 0xa0, strafeRight: 0xa1, use: 0xa2, fire: 0xa3,
@@ -81,11 +83,4 @@ export async function createEngine(wad, {
       return pixels;
     },
   };
-}
-
-export const statNames = Object.freeze(["tic", "gamestate", "episode", "map", "leveltime", "playerstate",
-  "health", "armor", "kills", "items", "secrets", "totalKills", "totalItems", "totalSecrets", "weapon", "ammo"]);
-export function readStats(module) {
-  const values = new Int32Array(module.HEAPU8.buffer, module._dg_stats(), statNames.length);
-  return Object.fromEntries(statNames.map((name, index) => [name, values[index]]));
 }

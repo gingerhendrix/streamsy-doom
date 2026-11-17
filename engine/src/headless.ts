@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import { readStats } from "./stats.js";
 import type { EngineIdentity, EngineStats } from "./engine.js";
 export interface HeadlessEngine {
   readonly tic: number;
@@ -7,8 +8,6 @@ export interface HeadlessEngine {
   step(frame: Uint8Array): boolean;
   reset(identity: EngineIdentity): void;
 }
-const names: readonly (keyof EngineStats)[] = ["tic", "gamestate", "episode", "map", "leveltime", "playerstate",
-  "health", "armor", "kills", "items", "secrets", "totalKills", "totalItems", "totalSecrets", "weapon", "ammo"];
 export function headlessFactory(factory: (options: any) => Promise<any>, wad: Uint8Array, buildId: string, wadSha256: string, instantiate: Record<string, unknown>) {
   // One immutable WAD and pre-init baseline per factory/isolate. No MEMFS WAD
   // copy, per-engine baseline, frames allocation, render buffer or client snapshot.
@@ -29,10 +28,7 @@ export function headlessFactory(factory: (options: any) => Promise<any>, wad: Ui
     reset(identity);
     return {
       get tic() { return module._dg_gametic(); }, reset,
-      stats() {
-        const values = new Int32Array(module.HEAPU8.buffer, module._dg_stats(), names.length);
-        return Object.fromEntries(names.map((name, i) => [name, values[i]])) as EngineStats;
-      },
+      stats() { return readStats(module); },
       step(frame) {
         if (frame.length !== 9) throw new Error("Replay needs a 9-byte frame");
         module.HEAPU8.set(frame, module._dg_input());

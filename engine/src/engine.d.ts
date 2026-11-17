@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import { statNames } from "./stats.js";
 export const keys: Readonly<Record<"up" | "down" | "left" | "right" | "strafeLeft" | "strafeRight" | "use" | "fire" | "run" | "strafe", number>>;
 export interface EngineIdentity {
   version: number; buildId: string; wadSha256: string; skill: number; episode: number; map: number;
 }
 export interface EngineSnapshot extends EngineIdentity { tic: number; heap: Uint8Array }
-export type EngineStats = Record<"tic" | "gamestate" | "episode" | "map" | "leveltime" | "playerstate" |
-  "health" | "armor" | "kills" | "items" | "secrets" | "totalKills" | "totalItems" | "totalSecrets" | "weapon" | "ammo", number>;
-export const statNames: readonly (keyof EngineStats)[];
-export function readStats(module: any): EngineStats;
+export type EngineStats = Record<typeof statNames[number], number>;
+export { statNames, readStats } from "./stats.js";
 export interface Engine {
   readonly identity: EngineIdentity;
   readonly tic: number;
