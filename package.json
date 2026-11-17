@@ -6,7 +6,7 @@
   "scripts": {
     "fetch-wad": "bun engine/scripts/fetch-wad.ts",
     "build:engine": "bun engine/scripts/build.ts",
-    "test": "bun test engine/test",
+    "test": "bun test engine/test test",
     "typecheck": "tsc --noEmit",
     "dev:host": "bun apps/host-bun/host.ts"
   },
