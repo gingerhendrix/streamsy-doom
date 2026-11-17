@@ -11,7 +11,7 @@ export class FixedStep {
   }
   pause() { this.previous = undefined; this.debt = 0; }
 }
-// One serialized drain includes frame POST, manifest, checkpoints and lobby.
+// One serialized drain includes frame POST, manifest and checkpoints.
 // Fail closed: never retry an ambiguous append or run later work after failure.
 export class FrameQueue<T> {
   private frames: Uint8Array[] = [];
@@ -37,13 +37,5 @@ export class FrameQueue<T> {
       await this.persist(frames, checkpoints);
       this.pending -= frames.length; this.latency = performance.now() - start;
     }
-  }
-}
-export class Throttle {
-  private last = -Infinity;
-  constructor(readonly interval = 2000) {}
-  due(now: number) {
-    if (now - this.last < this.interval) return false;
-    this.last = now; return true;
   }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { FixedStep, FrameQueue, Throttle } from "../../apps/web/timing";
+import { FixedStep, FrameQueue } from "../../apps/web/timing";
 test("fixed step preserves time debt and pause excludes background time", () => {
   const clock = new FixedStep(); let tics = 0;
   const step = () => { tics++; };
@@ -30,8 +30,4 @@ test("ambiguous failures stop later writes without retry", async () => {
   const queue = new FrameQueue(async () => { calls++; throw new Error("network lost"); });
   queue.push(new Uint8Array(9)); await expect(queue.flush()).rejects.toThrow("network lost");
   queue.push(new Uint8Array(9)); await expect(queue.flush()).rejects.toThrow("network lost"); expect(calls).toBe(1);
-});
-test("lobby throttle publishes immediately then at most every two seconds", () => {
-  const throttle = new Throttle();
-  expect([0, 10, 1999, 2000, 2001, 4000].filter(time => throttle.due(time))).toEqual([0, 2000, 4000]);
 });

@@ -8,7 +8,6 @@ export interface SessionHeader extends Identity { formatVersion: 1; forkedFrom: 
 export interface BatchBoundary { startTic: number; endTic: number; before: string; after: string }
 interface Manifest { headerOffset?: string; batch?: BatchBoundary }
 export class SessionWriter {
-  readonly batches: BatchBoundary[] = [];
   private busy = false;
   private tickCount: number;
   constructor(readonly client: ProtocolClient, public row: SessionMetadata, public offset: string, readonly snapshotInterval = 4200) {
@@ -27,7 +26,6 @@ export class SessionWriter {
       this.offset = offsetOf(response);
       const batch = { startTic: this.tic, endTic: this.tic + frames.length, before, after: this.offset };
       this.tickCount = batch.endTic;
-      this.batches.push(batch);
       await this.client.append(batchPath(this.row.id), JSON.stringify([{ batch }]), "application/json");
       return batch;
     } finally { this.busy = false; }
@@ -68,7 +66,6 @@ export async function createSession(client: ProtocolClient, options: {
 export class SessionReader {
   header?: SessionHeader;
   readonly frames: Uint8Array[] = [];
-  readonly reads: { startTic: number; endTic: number; before: string; after: string }[] = [];
   offset = "-1";
   private cursor?: string;
   private upToDate = false;
@@ -86,13 +83,11 @@ export class SessionReader {
       bytes = bytes.subarray(end + 1);
     }
     if (bytes.length % 9) throw new Error("Truncated frame batch");
-    const startTic = this.frames.length;
     const events = [];
     for (let i = 0; i < bytes.length; i += 9) {
       const frame = bytes.slice(i, i + 9); this.frames.push(frame);
       events.push({ tic: this.frames.length, frame, offset: batch.offset });
     }
-    this.reads.push({ startTic, endTic: this.frames.length, before, after: batch.offset });
     this.offset = batch.offset; this.cursor = batch.cursor; this.upToDate = batch.upToDate; this.closed = batch.closed;
     return events;
   }

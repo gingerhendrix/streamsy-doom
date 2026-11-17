@@ -6,7 +6,7 @@ import { createEngine, keys } from "../../engine/src/engine.js";
 import { startHost, exposedHeaders } from "../../apps/host-bun/host";
 import {
   ProtocolClient, SessionReader, SnapshotStore, Lobby, createSession, forkSession, deleteSession,
-  snapshotPath, indexPath, sessionPath, batchPath,
+  snapshotPath, indexPath, sessionPath, batchPath, type BatchBoundary,
 } from "../../src/streams";
 const wadPath = process.env.DOOM_WAD ?? fileURLToPath(new URL("../../engine/data/freedoom1.wad", import.meta.url));
 const build = fileURLToPath(new URL("../../engine/build/", import.meta.url));
@@ -56,9 +56,10 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
       ] as const) player.key(key, down);
       if (tic % 17 === 0) player.render();
     };
+    const batches: BatchBoundary[] = [];
     let batchNo = 0;
     while (writer.tic < 5000) {
-      await writer.record(player, Math.min([127, 91, 203, 67][batchNo++ % 4], 5000 - writer.tic), input);
+      batches.push(await writer.record(player, Math.min([127, 91, 203, 67][batchNo++ % 4], 5000 - writer.tic), input));
     }
     hashes.set(5000, player.hash());
     await tail;
@@ -84,7 +85,7 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
     const seekEngine = await create();
     expect(await fresh.seek(seekEngine, 4321)).toEqual({ snapshotTic: 3000, replayed: 1321 });
     expect(seekEngine.hash()).toBe(hashes.get(4321)!);
-    const containing = writer.batches.find(batch => batch.startTic > 3000 && batch.endTic - batch.startTic > 30)!;
+    const containing = batches.find(batch => batch.startTic > 3000 && batch.endTic - batch.startTic > 30)!;
     const forkTic = containing.startTic + 17;
     const child = await forkSession(client, parent, forkTic, { id: childId, playerName: "Fork", snapshotInterval: 1500 });
     const forkRequest = requests.find(request => request.method === "PUT" && request.path === `/${sessionPath(childId)}`)!;
@@ -134,7 +135,7 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
     expect(unexpected).toEqual([]);
     const growingReads = requests.filter(request => request.method === "GET");
     expect(growingReads.every(request => request.headers.get("Cache-Control") === "no-cache")).toBe(true);
-    console.log(`Stream integration: 5000 matching tics; live batches=${liveReader.reads.length}; seek=3000→4321; fork=${forkTic}, sub-offset=153; snapshot gzip envelope sizes=${entries.map(entry => `${entry.tic}:${entry.size}`).join(", ")}; requests=${requests.length}`);
+    console.log(`Stream integration: 5000 matching tics; session GETs=${requests.filter(request => request.method === "GET" && request.path === `/${sessionPath(parent)}`).length}; seek=3000→4321; fork=${forkTic}, sub-offset=153; snapshot gzip envelope sizes=${entries.map(entry => `${entry.tic}:${entry.size}`).join(", ")}; requests=${requests.length}`);
   } finally {
     abort.abort();
     await tail?.catch(() => {});
@@ -171,7 +172,12 @@ test("host: placeholder/static safety, CORS fork preflight and exposed headers, 
 test.skipIf(missing.length > 0)("fresh clients: exact boundary, tic zero, inherited partial-batch fork and fresh index reads", async () => {
   const host = await startHost({ port: 0, database: ":memory:" });
   try {
-    const client = new ProtocolClient(host.url);
+    const reads: string[] = [];
+    const client = new ProtocolClient(host.url, (input, init) => {
+      const url = new URL(String(input));
+      if ((!init?.method || init.method === "GET") && url.pathname.startsWith("/doom/v2/sessions/")) reads.push(url.href);
+      return fetch(input, init);
+    });
     const { recording } = await import("../helpers/recording");
     const { identity, frames } = await recording(1003, false);
     const id = (n: number) => "b".repeat(32) + "_" + n.toString(16).padStart(32, "0");
@@ -200,9 +206,12 @@ test.skipIf(missing.length > 0)("fresh clients: exact boundary, tic zero, inheri
     // aggregation and pagination independently of response chunking.
     const paged = await createSession(client, { id: pagedId, playerName: "Paging", identity });
     for (let i = 0; i < 1003; i++) await paged.append([frames[i]]);
+    reads.length = 0;
     const pagedReader = await new SessionReader(client, pagedId).catchUp();
     expect(pagedReader.frames.length).toBe(1003);
-    expect(pagedReader.reads.length).toBeGreaterThan(1);
+    expect(reads.length).toBeGreaterThan(1);
+    expect(new URL(reads[0]).searchParams.get("offset")).toBe("-1");
+    expect(new URL(reads[1]).searchParams.get("offset")).not.toBe("-1");
     await forkSession(client, pagedId, 1001, { id: id(5), playerName: "Paged fork" });
     expect((await new SessionReader(client, id(5)).catchUp()).frames).toEqual(pagedReader.frames.slice(0, 1001));
     await expect(writer.append([new Uint8Array(8)])).rejects.toThrow("9-byte");

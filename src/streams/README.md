@@ -41,7 +41,8 @@ server state before attempting recovery.
 `follow(signal)` yields `{ tic, frame, offset }` through catch-up then long poll.
 Tics count completed frames (1-based); frame array indices are 0-based.
 The yielded offset is the end of the HTTP response, which can contain multiple
-POSTs; `reader.reads` retains before/after offsets and tic ranges for each read.
+POSTs. `append` and `record` return the stored batch boundary, including its
+before/after offsets and tic range. Writers and readers retain no diagnostic history.
 `reader.frames` retains the log for local seeking. Keep a reader per consumer;
 its pull/catchUp/follow methods must not run concurrently. Abort a follow using
 its signal; aborting an active fetch rejects the iterator.
