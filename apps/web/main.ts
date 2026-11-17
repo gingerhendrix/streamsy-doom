@@ -73,15 +73,22 @@ async function showLobby() {
   // Fold live rows from their real next offset; never re-read a cached lobby head.
   void (async () => {
     await lobby.init();
-    let offset = "-1", cursor: string | undefined, live = false;
     const rows = new Map<string, SessionRow>();
-    while (!abort.signal.aborted) {
-      const batch = await client.read("doom/lobby", offset, live, abort.signal, cursor);
-      if (abort.signal.aborted) break;
-      for (const row of JSON.parse(new TextDecoder().decode(batch.bytes) || "[]") as SessionRow[]) rows.set(row.id, row);
-      offset = batch.offset; cursor = batch.cursor; live = batch.upToDate;
-      renderRows([...rows.values()].filter(row => row.status !== "deleted").reverse());
-    }
+    await Promise.all(["doom/lobby", "doom/v2/lobby"].map(async path => {
+      let offset = "-1", cursor: string | undefined, live = false;
+      while (!abort.signal.aborted) {
+        const batch = await client.read(path, offset, live, abort.signal, cursor);
+        if (abort.signal.aborted) break;
+        const events = JSON.parse(new TextDecoder().decode(batch.bytes) || "[]");
+        for (const event of events) {
+          if (path === "doom/lobby") rows.set(event.id, event);
+          else if (event.headers.operation === "delete") rows.delete(event.key);
+          else rows.set(event.key, event.value);
+        }
+        offset = batch.offset; cursor = batch.cursor; live = batch.upToDate;
+        renderRows([...rows.values()].filter(row => row.status !== "deleted").sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+      }
+    }));
   })().catch(error => { if (!abort.signal.aborted) report(error); });
 }
 function renderRows(rows: SessionRow[]) {

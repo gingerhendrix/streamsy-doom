@@ -9,6 +9,7 @@
         "@effect/sql-sqlite-bun": "4.1.2",
         "@effect/sql-sqlite-do": "4.1.2",
         "@streamsy/core": "0.12.0",
+        "@streamsy/projection": "0.12.0",
         "@streamsy/serve": "0.12.0",
         "@streamsy/storage": "0.12.0",
         "effect": "4.1.2",
@@ -212,6 +213,8 @@
     "@speed-highlight/core": ["@speed-highlight/core@1.2.24", "", {}, "sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw=="],
 
     "@streamsy/core": ["@streamsy/core@0.12.0", "", { "peerDependencies": { "effect": "^4.1.2", "vitest": "^5.0.0" }, "optionalPeers": ["vitest"] }, "sha512-kmClwAOnRfglWu3qaz02qcSzoKa2Pb80pyytHiJyXwD20ymRWgUdQB214PetncIslmSDfzLbC59373AnySaxWw=="],
+
+    "@streamsy/projection": ["@streamsy/projection@0.12.0", "", { "dependencies": { "@streamsy/core": "^0.12.0" }, "peerDependencies": { "effect": "^4.1.2" } }, "sha512-tsRL+GC+of2cKV/rI4jznPbeHoyCykLGLYdGx+SmVEFlD22eQcgKGGHZqiqPSmwvt34DUTdbjL7p6tmAHVKlmQ=="],
 
     "@streamsy/serve": ["@streamsy/serve@0.12.0", "", { "dependencies": { "@streamsy/core": "^0.12.0" }, "peerDependencies": { "@alchemy.run/cloudflare": "2.0.0-beta.85", "@effect/platform-bun": "^4.1.2", "@effect/platform-deno": "^4.1.2", "@effect/platform-node": "^4.1.2", "alchemy": "2.0.0-beta.85", "effect": "^4.1.2" }, "optionalPeers": ["@alchemy.run/cloudflare", "@effect/platform-bun", "@effect/platform-deno", "@effect/platform-node", "alchemy"] }, "sha512-/T/OyuBjB80cqtsOwBbDB3Q4jwPdsVO4CygVgFvaF1ULiX+2xfi/MQTIee5dM8cZyh76/f3ZJi+53DjHxg4khQ=="],
 

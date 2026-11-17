@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+import { isFamilyId } from "./ids";
 export const binary = "application/octet-stream";
-export const sessionPath = (id: string) => `doom/sessions/${validId(id)}`;
-export const batchPath = (id: string) => `doom/batches/${validId(id)}`;
-export const indexPath = (id: string) => `doom/snapshots/${validId(id)}-idx`;
-export const snapshotPath = (id: string, tic: number) => `doom/snapshots/${validId(id)}-${tic}`;
+export const sessionPath = (id: string) => `${isFamilyId(id) ? "doom/v2" : "doom"}/sessions/${validId(id)}`;
+export const batchPath = (id: string) => `${isFamilyId(id) ? "doom/v2" : "doom"}/batches/${validId(id)}`;
+export const indexPath = (id: string) => isFamilyId(id) ? `doom/v2/snapshot-index/${id}` : `doom/snapshots/${validId(id)}-idx`;
+export const snapshotPath = (id: string, tic: number) => isFamilyId(id) ? `doom/v2/snapshots/${id}/${uint32(tic)}` : `doom/snapshots/${validId(id)}-${uint32(tic)}`;
 export function validId(id: string) {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error("Invalid session id");
   return id;
@@ -18,6 +19,9 @@ export const offsetOf = (response: Response) => {
   if (!value) throw new Error("Missing Stream-Next-Offset");
   return value;
 };
+export class ProtocolError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
 export class ProtocolClient {
   constructor(readonly baseUrl: string, readonly fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = (input, init) => fetch(input, init)) {}
   async request(path: string, init: RequestInit = {}) {
@@ -27,7 +31,7 @@ export class ProtocolClient {
     const response = await this.fetcher(new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"), {
       ...init, headers, cache: "no-store",
     });
-    if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`);
+    if (!response.ok) throw new ProtocolError(`${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`, response.status);
     return response;
   }
   async create(path: string, body: Uint8Array | string, type = binary, ttl = 43200, extra: Record<string, string> = {}) {

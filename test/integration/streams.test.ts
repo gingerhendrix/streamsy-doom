@@ -13,7 +13,10 @@ const build = fileURLToPath(new URL("../../engine/build/", import.meta.url));
 const missing = [wadPath, ...["doom.js", "doom.wasm", "build-id.js"].map(name => build + name)].filter(path => !existsSync(path));
 if (missing.length) console.warn(`SKIP real-engine stream integration: missing ${missing.join(", ")}. Run bun run fetch-wad && bun run build:engine, or set DOOM_WAD.`);
 
-test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek, mid-batch and chained forks, delete", async () => {
+for (const v2 of [false, true]) test.skipIf(missing.length > 0)(`real WASM (${v2 ? "v2" : "legacy"}): 5000 tics, live tail, snapshot seek, mid-batch and chained forks, delete`, async () => {
+  const parent = v2 ? "a".repeat(32) + "_" + "1".repeat(32) : "parent";
+  const childId = v2 ? "a".repeat(32) + "_" + "2".repeat(32) : "child";
+  const grandchildId = v2 ? "a".repeat(32) + "_" + "3".repeat(32) : "grandchild";
   const requests: { method: string; path: string; status: number; headers: Headers; live: boolean }[] = [];
   const host = await startHost({ port: 0, database: ":memory:", longPollTimeoutMs: 50,
     onRequest(request, response) {
@@ -28,8 +31,8 @@ test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek,
     const wad = await Bun.file(wadPath).bytes(), wasmBinary = await Bun.file(build + "doom.wasm").bytes();
     const create = () => createEngine(wad, { wasmBinary, skill: 3, episode: 1, map: 1 });
     const player = await create();
-    const writer = await createSession(client, { id: "parent", playerName: "Recorder", identity: player.identity, snapshotInterval: 1500 });
-    const liveReader = new SessionReader(client, "parent");
+    const writer = await createSession(client, { legacy: !v2, id: parent, playerName: "Recorder", identity: player.identity, snapshotInterval: 1500 });
+    const liveReader = new SessionReader(client, parent);
     await liveReader.catchUp();
     const liveFrames: Uint8Array[] = [];
     tail = (async () => {
@@ -60,7 +63,7 @@ test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek,
     hashes.set(5000, player.hash());
     await tail;
     expect(liveFrames.length).toBe(5000);
-    const fresh = await new SessionReader(client, "parent").catchUp();
+    const fresh = await new SessionReader(client, parent).catchUp();
     expect(liveFrames).toEqual(fresh.frames);
     expect(requests.some(request => request.live)).toBe(true);
     expect(fresh.header).toMatchObject({ formatVersion: 1, ...player.identity, forkedFrom: null, forkTic: null });
@@ -69,12 +72,12 @@ test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek,
       replay.step(fresh.frames[i]); expect(replay.hash()).toBe(hashes.get(i + 1)!);
     }
     expect(replay.driftCount).toBe(0);
-    const parentStore = new SnapshotStore(client, "parent");
+    const parentStore = new SnapshotStore(client, parent);
     const entries = await parentStore.entries();
     expect(entries.map(entry => entry.tic)).toEqual([1500, 3000, 4500]);
     for (const entry of entries) {
       expect(entry.size).toBeLessThan(2_000_000);
-      const response = await client.request(snapshotPath("parent", entry.tic), { method: "HEAD" });
+      const response = await client.request(snapshotPath(parent, entry.tic), { method: "HEAD" });
       expect(response.headers.get("Stream-Closed")).toBe("true");
       expect(response.headers.get("Stream-TTL")).toBe("86400");
     }
@@ -83,18 +86,18 @@ test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek,
     expect(seekEngine.hash()).toBe(hashes.get(4321)!);
     const containing = writer.batches.find(batch => batch.startTic > 3000 && batch.endTic - batch.startTic > 30)!;
     const forkTic = containing.startTic + 17;
-    const child = await forkSession(client, "parent", forkTic, { id: "child", playerName: "Fork", snapshotInterval: 1500 });
-    const forkRequest = requests.find(request => request.method === "PUT" && request.path === "/doom/sessions/child")!;
+    const child = await forkSession(client, parent, forkTic, { id: childId, playerName: "Fork", snapshotInterval: 1500 });
+    const forkRequest = requests.find(request => request.method === "PUT" && request.path === `/${sessionPath(childId)}`)!;
     expect(forkRequest.status).toBe(201);
     expect(forkRequest.headers.get("Stream-Fork-Offset")).toBe(containing.before);
     expect(forkRequest.headers.get("Stream-Fork-Sub-Offset")).toBe(String(17 * 9));
-    const childReader = await new SessionReader(client, "child").catchUp();
+    const childReader = await new SessionReader(client, childId).catchUp();
     expect(childReader.frames).toEqual(fresh.frames.slice(0, forkTic));
-    const childStore = new SnapshotStore(client, "child");
+    const childStore = new SnapshotStore(client, childId);
     expect((await childStore.entries()).map(entry => entry.tic)).toEqual([1500, 3000]);
     for (const entry of await childStore.entries()) {
-      expect(await client.all(snapshotPath("child", entry.tic))).toEqual(await client.all(snapshotPath("parent", entry.tic)));
-      expect((await client.request(snapshotPath("child", entry.tic), { method: "HEAD" })).headers.get("Stream-Closed")).toBe("true");
+      expect(await client.all(snapshotPath(childId, entry.tic))).toEqual(await client.all(snapshotPath(parent, entry.tic)));
+      expect((await client.request(snapshotPath(childId, entry.tic), { method: "HEAD" })).headers.get("Stream-Closed")).toBe("true");
     }
     const forkEngine = await create();
     expect(await childReader.seek(forkEngine, forkTic)).toEqual({ snapshotTic: 3000, replayed: forkTic - 3000 });
@@ -108,8 +111,8 @@ test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek,
     const continued = await create();
     await childReader.seek(continued, forkTic + 53);
     expect(continued.hash()).toBe(forkEngine.hash());
-    expect((await new SessionReader(client, "parent").catchUp()).frames).toEqual(fresh.frames);
-    const grandchild = await forkSession(client, "child", forkTic + 11, { id: "grandchild", playerName: "Nested fork" });
+    expect((await new SessionReader(client, parent).catchUp()).frames).toEqual(fresh.frames);
+    const grandchild = await forkSession(client, childId, forkTic + 11, { id: grandchildId, playerName: "Nested fork" });
     const grandReader = await new SessionReader(client, grandchild.row.id).catchUp();
     expect(grandReader.frames).toEqual(childReader.frames.slice(0, forkTic + 11));
     const grandEngine = await create();
@@ -117,16 +120,16 @@ test.skipIf(missing.length > 0)("real WASM: 5000 tics, live tail, snapshot seek,
     const comparison = await create();
     await childReader.seek(comparison, grandchild.tic);
     expect(grandEngine.hash()).toBe(comparison.hash());
-    await deleteSession(client, "grandchild");
-    await deleteSession(client, "child");
-    for (const path of [snapshotPath("child", 1500), snapshotPath("child", 3000), indexPath("child"), batchPath("child")]) {
+    await deleteSession(client, grandchildId);
+    await deleteSession(client, childId);
+    for (const path of [snapshotPath(childId, 1500), snapshotPath(childId, 3000), indexPath(childId), batchPath(childId)]) {
       expect((await fetch(new URL(path, host.url), { method: "HEAD" })).status).toBe(404);
     }
-    expect((await client.request(sessionPath("child"), { method: "HEAD" })).status).toBe(200); // TTL policy
-    expect((await client.request(snapshotPath("parent", 3000), { method: "HEAD" })).status).toBe(200);
-    expect(await new Lobby(client).get("child")).toMatchObject({ status: "deleted", forkedFrom: "parent", forkTic, tickCount: forkTic + 53 });
+    expect((await client.request(sessionPath(childId), { method: "HEAD" })).status).toBe(200); // TTL policy
+    expect((await client.request(snapshotPath(parent, 3000), { method: "HEAD" })).status).toBe(200);
+    expect(await new Lobby(client).get(childId)).toMatchObject({ status: "deleted", forkedFrom: parent, forkTic, tickCount: forkTic + 53 });
     await writer.end();
-    expect((await new Lobby(client).get("parent")).status).toBe("ended");
+    expect((await new Lobby(client).get(parent)).status).toBe("ended");
     const unexpected = requests.filter(request => request.status >= 400 && !(request.method === "HEAD" && request.status === 404));
     expect(unexpected).toEqual([]);
     const growingReads = requests.filter(request => request.method === "GET");
@@ -170,7 +173,7 @@ test("fresh clients: exact boundary, tic zero, inherited partial-batch fork and 
   try {
     const client = new ProtocolClient(host.url);
     const identity = { version: 2, buildId: "test", wadSha256: "test", skill: 3, episode: 1, map: 1 };
-    const writer = await createSession(client, { id: "boundaries", playerName: "Test", identity });
+    const writer = await createSession(client, { legacy: true, id: "boundaries", playerName: "Test", identity });
     await writer.append([new Uint8Array(9).fill(1), new Uint8Array(9).fill(2), new Uint8Array(9).fill(3)]);
     await writer.append([new Uint8Array(9).fill(4), new Uint8Array(9).fill(5)], { publishLobby: false });
     expect((await new Lobby(client).get("boundaries")).tickCount).toBe(3);
@@ -191,7 +194,7 @@ test("fresh clients: exact boundary, tic zero, inherited partial-batch fork and 
     expect((await store.load((await store.entries())[1])).heap).toEqual(new Uint8Array(64).fill(2));
     // HTTP catch-up is capped at 1000 stored messages; boundaries must survive
     // aggregation and pagination independently of response chunking.
-    const paged = await createSession(client, { id: "paged", playerName: "Paging", identity });
+    const paged = await createSession(client, { legacy: true, id: "paged", playerName: "Paging", identity });
     for (let i = 0; i < 1003; i++) await paged.append([new Uint8Array(9).fill(i % 256)]);
     const pagedReader = await new SessionReader(client, "paged").catchUp();
     expect(pagedReader.frames.length).toBe(1003);

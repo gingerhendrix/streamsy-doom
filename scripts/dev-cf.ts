@@ -10,7 +10,7 @@ const runtime = new Miniflare({
   host: "127.0.0.1", port: Number(process.env.PORT ?? 3000), cf: false,
   assets: { directory: `${root}apps/host-cloudflare/dist/assets`, binding: "ASSETS",
     routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },
-  durableObjects: { STREAMS: { className: "DoomStreams", useSQLite: true } },
+  durableObjects: { STREAMS: { className: "DoomStreams", useSQLite: true }, GAMES: { className: "DoomGames", useSQLite: true }, REPLAYS: { className: "DoomReplay", useSQLite: true }, LOBBY: { className: "DoomLobby", useSQLite: true } },
   durableObjectsPersist: process.env.DOOM_CF_STATE ?? `${root}.alchemy/miniflare`,
 });
 console.log(`Streamsy Doom (local workerd): ${await runtime.ready}`);

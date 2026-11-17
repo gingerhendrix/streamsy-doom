@@ -1,20 +1,115 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import type { DurableObjectNamespace, ExportedHandler, Fetcher } from "@cloudflare/workers-types";
+import type { DurableObjectNamespace, DurableObjectState, ExecutionContext, IncomingRequestCfProperties, Request as WorkerRequest, Fetcher } from "@cloudflare/workers-types";
+import { Effect, Layer } from "effect";
+import { HttpRouter, HttpServerResponse } from "effect/http";
+import { Http, Streamsy } from "@streamsy/core";
 import { routes, type StreamsReader, type StreamsWriter } from "@streamsy/core/protocol";
-import { Placement, StreamsyObject, router } from "@streamsy/serve/cloudflare";
+import { CheckpointStore, ProjectionWakeup } from "@streamsy/projection";
+import { Placement, StreamsyObject, router, type ObjectInstance } from "@streamsy/serve/cloudflare";
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
+import { familyOf } from "../../src/streams/ids";
+import { familyStreams, lobbyStreams, ReplayWake, LobbyStream, Scores, Sessions } from "../../src/streams/v2";
+import { frameWake, frameCounter } from "../../src/projection/counter";
+import { placement, framesLink, wakeLink, scoresLink } from "./topology";
 
-interface Env { STREAMS: DurableObjectNamespace; ASSETS: Fetcher }
+export interface Env { STREAMS: DurableObjectNamespace; GAMES: DurableObjectNamespace; REPLAYS: DurableObjectNamespace; LOBBY: DurableObjectNamespace; ASSETS: Fetcher }
+// Retain this class, namespace and object name for all legacy recordings.
 export const DoomStreams = StreamsyObject.make<Env, StreamsReader | StreamsWriter>({
   app: routes({ prefix: "/", maxMessageSize: 2_000_000 }),
   layer: state => DurableObjectStorage.layerProtocol({ client: { storage: state.storage }, longPollTimeoutMs: 20_000 }),
 });
-// A fork is resolved within one object, including across different session ids.
-const streams = router<Env>({ prefix: "/", placement: Placement.byKey(() => "doom"), namespace: env => env.STREAMS });
+const gameLayer = (state: DurableObjectState) => CheckpointStore.layer.pipe(
+  Layer.provideMerge(DurableObjectStorage.layer(familyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 })),
+);
+export const DoomGames = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof gameLayer>>, ReplayWake>({
+  app: Layer.merge(Http.routes(familyStreams, { prefix: "/", access: "full", maxMessageSize: 2_000_000 }), framesLink.routes),
+  layer: gameLayer, links: env => [wakeLink.client(env.REPLAYS)], wakeups: [ProjectionWakeup.attach(frameWake)],
+});
+const initScores = HttpRouter.add("POST", "/__init-scores", Effect.gen(function* () {
+  yield* (yield* Scores).create({}, { ttlSeconds: 43200 });
+  return HttpServerResponse.empty({ status: 204 });
+}).pipe(Effect.orDie));
+const lobbyLayer = (state: DurableObjectState) => DurableObjectStorage.layer(lobbyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 });
+export const DoomLobby = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof lobbyLayer>>>({
+  app: Layer.mergeAll(Http.routes(lobbyStreams, { prefix: "/", access: stream => stream === Scores ? "read" : "full" }), scoresLink.routes, initScores),
+  layer: lobbyLayer,
+});
+
+function replayHost(id: string, state: DurableObjectState, env: Env): ObjectInstance {
+  // Same concrete address as ReplayWake.at({id}), with no parameters. It is
+  // intentionally local; only Sessions and Scores are ObjectLink services.
+  class LocalWake extends Streamsy.wake<LocalWake>()("DoomV2/LocalWake", `doom/v2/replay-wake/${id}`, { params: {} }) {}
+  const layer = (owner: DurableObjectState) => CheckpointStore.layer.pipe(
+    Layer.provideMerge(DurableObjectStorage.layer(Streamsy.group(ReplayWake), { client: { storage: owner.storage } })),
+  );
+  const Host = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof layer>>, Sessions | Scores>({
+    app: Layer.mergeAll(wakeLink.routes, Http.routes(Streamsy.group(ReplayWake), { prefix: "/", access: "read" }),
+      HttpRouter.add("POST", "/__init-replay", Effect.gen(function* () {
+        yield* (yield* ReplayWake).create({ id }, { ttlSeconds: 43200 });
+        return HttpServerResponse.empty({ status: 204 });
+      }).pipe(Effect.orDie))),
+    layer, links: bindings => {
+      const frames = framesLink.client(bindings.GAMES), scores = scoresLink.client(bindings.LOBBY);
+      return [{ streams: [...frames.streams, ...scores.streams], layer: Layer.merge(frames.layer, scores.layer) }];
+    },
+    wakeups: [ProjectionWakeup.attach(frameCounter, { triggers: [LocalWake] })],
+  });
+  return new Host(state, env);
+}
+// Bootstrap is outside identity-dependent acquisition, using only public DO and
+// StreamsyObject APIs. Once saved, identity selects one layer graph per lifetime.
+export class DoomReplay {
+  private identity?: string;
+  private host?: ObjectInstance;
+  private readonly ready: Promise<void>;
+  constructor(private readonly owner: DurableObjectState, private readonly bindings: Env) {
+    this.ready = owner.blockConcurrencyWhile(async () => { this.identity = await owner.storage.get<string>("doom-v2-session-id"); });
+  }
+  private acquire() {
+    if (!this.identity) throw new Error("Replay not bootstrapped");
+    return this.host ??= replayHost(this.identity, this.owner, this.bindings);
+  }
+  async fetch(request: Request): Promise<Response> {
+    await this.ready;
+    const path = new URL(request.url).pathname;
+    if (path.startsWith("/__bootstrap/") && request.method === "POST") {
+      const id = path.slice("/__bootstrap/".length);
+      try { familyOf(id); } catch { return new Response("Invalid v2 session id", { status: 400 }); }
+      const accepted = await this.owner.blockConcurrencyWhile(async () => {
+        if (this.identity && this.identity !== id) return false;
+        await this.owner.storage.put("doom-v2-session-id", id);
+        this.identity = id;
+        return true;
+      });
+      if (!accepted) return new Response("Replay identity conflict", { status: 409 });
+      return this.acquire().fetch(new Request("https://internal/__init-replay", { method: "POST" }));
+    }
+    if (!this.identity) return new Response("Replay not bootstrapped", { status: 409 });
+    return this.acquire().fetch(request);
+  }
+  async alarm(): Promise<void> { await this.ready; await this.acquire().alarm(); }
+}
+const legacy = router<Env>({ prefix: "/", placement: Placement.byKey(() => "doom"), namespace: env => env.STREAMS });
+const games = router<Env>({ prefix: "/", placement, namespace: env => env.GAMES });
+const replays = router<Env>({ prefix: "/", placement, namespace: env => env.REPLAYS });
+const lobby = router<Env>({ prefix: "/", placement, namespace: env => env.LOBBY });
 export default {
-  async fetch(request, env, context) {
-    return new URL(request.url).pathname.startsWith("/doom/")
-      ? streams.fetch!(request, env, context)
-      : env.ASSETS.fetch(request);
+  async fetch(request: WorkerRequest<unknown, IncomingRequestCfProperties>, env: Env, context: ExecutionContext) {
+    const path = new URL(request.url).pathname;
+    if (path.startsWith("/__")) return new Response(null, { status: 404 });
+    if (path.startsWith("/doom/v2/bootstrap/")) {
+      if (request.method !== "POST") return new Response(null, { status: 405 });
+      const id = path.slice("/doom/v2/bootstrap/".length);
+      try { familyOf(id); } catch { return new Response("Invalid v2 session id", { status: 400 }); }
+      const sink = await env.LOBBY.get(env.LOBBY.idFromName("lobby:v2")).fetch("https://internal/__init-scores", { method: "POST" });
+      if (!sink.ok) return sink;
+      return env.REPLAYS.get(env.REPLAYS.idFromName(`replay:${id}`)).fetch(`https://internal/__bootstrap/${id}`, { method: "POST" });
+    }
+    if (path.startsWith("/doom/v2/")) {
+      const owner = placement.name(path.slice(1));
+      const target = owner.startsWith("game:") ? games : owner.startsWith("replay:") ? replays : lobby;
+      return target.fetch!(request, env, context);
+    }
+    return path.startsWith("/doom/") ? legacy.fetch!(request, env, context) : env.ASSETS.fetch(request);
   },
-} satisfies ExportedHandler<Env>;
+};

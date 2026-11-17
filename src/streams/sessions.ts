@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { ProtocolClient, batchPath, binary, concat, encode, offsetOf, sessionPath, uint32 } from "./protocol";
+import { isFamilyId, familyOf, newSessionId, newForkId, assertForkFamily } from "./ids";
 import { Lobby, type SessionRow } from "./lobby";
 import { SnapshotStore, type Identity, type ReplayEngine } from "./snapshots";
 export interface SessionHeader extends Identity { formatVersion: 1; forkedFrom: string | null; forkTic: number | null }
@@ -46,11 +47,13 @@ export class SessionWriter {
   async end() { this.row.status = "ended"; await new Lobby(this.client).put(this.row); }
 }
 export async function createSession(client: ProtocolClient, options: {
-  id?: string; playerName: string; identity: Identity; snapshotInterval?: number;
+  id?: string; legacy?: boolean; playerName: string; identity: Identity; snapshotInterval?: number;
 }) {
-  const id = options.id ?? crypto.randomUUID();
+  const id = options.id ?? (options.legacy ? crypto.randomUUID() : newSessionId());
+  if (!options.legacy) familyOf(id);
   const header: SessionHeader = { ...options.identity, formatVersion: 1, forkedFrom: null, forkTic: null };
   const lobby = new Lobby(client); await lobby.init();
+  if (isFamilyId(id)) await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
   const response = await client.create(sessionPath(id), encode(header));
   const offset = offsetOf(response);
   await client.create(batchPath(id), JSON.stringify([{ headerOffset: offset }]), "application/json");
@@ -119,6 +122,10 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   id?: string; playerName: string; snapshotInterval?: number;
 }) {
   uint32(tic);
+  const id = options.id ?? (isFamilyId(parentId) ? newForkId(parentId) : crypto.randomUUID());
+  // Validate before bootstrap, lobby initialization, or any protocol PUT.
+  if (isFamilyId(parentId)) assertForkFamily(parentId, id);
+  else if (isFamilyId(id)) throw new Error("Cannot fork legacy recording into v2");
   const lobby = new Lobby(client), parent = await lobby.get(parentId);
   if (parent.status === "deleted") throw new Error("Invalid fork point");
   const manifest = await client.json<Manifest>(batchPath(parentId));
@@ -130,7 +137,7 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   const boundary = tic === 0 ? headerOffset : batches.find(batch => batch.endTic === tic)?.after;
   const offset = inside?.before ?? boundary;
   if (!offset) throw new Error("Missing fork batch boundary");
-  const id = options.id ?? crypto.randomUUID();
+  if (isFamilyId(id)) await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
   const headers: Record<string, string> = { "Stream-Forked-From": `/${sessionPath(parentId)}`, "Stream-Fork-Offset": offset };
   if (inside) headers["Stream-Fork-Sub-Offset"] = String((tic - inside.startTic) * 9);
   const response = await client.create(sessionPath(id), "", binary, 43200, headers);
