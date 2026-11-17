@@ -56,12 +56,17 @@ function visible(row: StatsRow) {
 /** Emit every qualifying tic, including inside a page. Unit boundaries cannot
  * drop intermediate deaths or change the resulting producer row sequence. */
 export function replayPages(state: StatsState, pages: readonly Uint8Array[], engine: HeadlessEngine, id: string) {
-  const decoded = decodePages(state, pages);
+  return replayDecoded(state, decodePages(state, pages), engine, id);
+}
+function replayDecoded(state: StatsState, decoded: ReturnType<typeof decodePages>, engine: HeadlessEngine, id: string) {
   let next: StatsState = { ...state, header: decoded.header, tail: decoded.tail };
   const rows: StatsRow[] = [];
   const publish = () => {
-    if (next.row && visible(next.row) !== next.published) {
-      next = { ...next, published: visible(next.row) }; rows.push(next.row!);
+    const row = next.row;
+    if (!row) return;
+    const published = visible(row);
+    if (published !== next.published) {
+      next = { ...next, published }; rows.push(row);
     }
   };
   if (decoded.header && !next.last) { next = accumulate(next, engine.stats(), true, id); publish(); }
@@ -106,7 +111,7 @@ export const replayStats = Projection.mapAccumBatch({
     if (!decoded.header || (state.last && !decoded.frames.length))
       return [{ ...state, tail: decoded.tail }, { scores: empty }] as const;
     const engine = yield* engineAt(unit.params.id, { ...state, header: decoded.header });
-    const next = replayPages(state, batch.frames.items, engine, unit.params.id);
+    const next = replayDecoded(state, decoded, engine, unit.params.id);
     return [next.state, { scores: next.rows.map(row => DurableState.upsert("stats", row)) }] as const;
   }),
 });
