@@ -5,3 +5,7 @@ dist/
 .env
 engine/build/
 engine/data/
+
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
