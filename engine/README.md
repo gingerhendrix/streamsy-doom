@@ -143,8 +143,8 @@ The worker-only glue scopes Emscripten environment probes to the Worker despite
 `nodejs_compat`; it never modifies global objects. `scripts/bundle-worker.ts`
 retains the WASM import for Cloudflare and local workerd's `CompiledWasm` loader.
 `apps/host-bun/engine.ts` provides the same adapter with Bun's WASM bytes loader.
-These adapters are tested independently; the application still uses batch 1's
-counter while the replay projection is blocked (see `replay-stats-handoff.md`).
+The replay projection uses these adapters to verify recorded inputs without
+trusting browser heap snapshots.
 
 ## Snapshot contract and measured sizes
 

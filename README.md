@@ -13,7 +13,7 @@ Browser keyboard → DoomGeneric WASM (35 tics/s) → 9-byte input frames
 Browser client ───────────── same-origin HTTP ────────────────┐
   engine + WAD parts     Bun host               Cloudflare Worker
   from static assets     one SQLite             ASSETS + Durable Objects
-                         local counter          game:<family> → replay:<id>
+                         local replay stats     game:<family> → replay:<id>
                                                         alarms ↓
                                                           lobby:v2
   /doom/v2/sessions/<family>_<session>  JSON header line + binary frames
@@ -22,7 +22,7 @@ Browser client ───────────── same-origin HTTP ──�
   /doom/v2/snapshots/<id>/<tic>         closed gzip heap snapshots
   /doom/v2/replay-wake/<id>            internal producer wake rows (public read)
   /doom/v2/lobby                       browser-written State session rows
-  /doom/v2/scores                      server-written State tic counts (public read)
+  /doom/v2/scores                      server-written verified State stats (public read)
   /doom/*                             legacy paths, still on object doom
 ```
 
@@ -61,7 +61,7 @@ Choose a name and skill, then New game (E1M1). Click the canvas for keyboard foc
 
 Watch follows the stream live. Release the timeline slider to seek; the snapshot-to-target range appears below it. Follow live catches up again. Fork here opens a child at the displayed tic and starts recording new inputs. End game drains pending writes and returns to the lobby. Delete appears for sessions created by that browser, remembered in localStorage. It removes the child's snapshots/index/manifest and hides its row; the binary session is retained until TTL. This ownership UI provides no authorization.
 
-Frames flush in batches of about five tics through one serialized queue, which coalesces work behind slow writes. The screen shows pending frames and batch latency including metadata work. Lobby counts publish at most once per two seconds, and on End. A shared `#watch/<id>` URL always opens an observer, never another writer. The existing lobby view combines legacy JSON rows and v2 State session rows. Server scores currently count decoded tics only; engine verification and the stats UI belong to later batches.
+Frames flush in batches of about five tics through one serialized queue, which coalesces work behind slow writes. The screen shows pending frames and batch latency including metadata work. Lobby counts publish at most once per two seconds, and on End. A shared `#watch/<id>` URL always opens an observer, never another writer. The existing lobby view combines legacy JSON rows and v2 State session rows. Server scores now contain verified replay stats; the stats UI belongs to batch 3.
 
 ## Cloudflare
 
@@ -91,9 +91,13 @@ Keep these identifiers and local Alchemy state across deployments; changing reso
 
 Every request runs through the Worker. Legacy `/doom/*` paths retain `Placement.byKey(() => "doom")` and the original `DoomStreams` binding. V2 uses one shared `Placement.byRoute` table for public routing and internal object links: frames, manifests and snapshots go to `game:<family>`, wake streams to `replay:<id>`, and lobby/scores to `lobby:v2`. Alchemy derives additive SQLite class migrations from the three new bindings; retain its existing state when deploying.
 
-The client calls `POST /doom/v2/bootstrap/<id>` before creating frames, including forks. The Worker first initializes scores, then the replay owner durably saves its immutable ID and acquires a Streamsy host with a fixed local wake trigger. Frame commits schedule a family alarm to publish wakes; the receiving replay alarm reads remote bytes and publishes a deterministic tic count using producer delivery. Internal `/__frames`, `/__wake` and `/__scores` routes are reachable only through object stubs. Public requests under `/__…` return 404; scores and wakes are publicly read-only. Bun serves the same v2 API with a local attached counter over its single SQLite store.
+The client calls `POST /doom/v2/bootstrap/<id>` before creating frames, including forks. The Worker first initializes scores, then the replay owner durably saves its immutable ID and acquires a Streamsy host with a fixed local wake trigger. Frame commits schedule a family alarm to publish wakes; the receiving replay alarm reads remote bytes and runs the headless engine and publishes deterministic stats using producer delivery. Internal `/__frames`, `/__wake` and `/__scores` routes are reachable only through object stubs. Public requests under `/__…` return 404; scores and wakes are publicly read-only. Bun serves the same v2 API with locally attached stats and idle projections over its single SQLite store.
 
-`maxMessageSize: 2_000_000` leaves room for snapshots while retaining the tested SQLite envelope. Both hosts share an origin with their client; Bun also retains its development CORS headers. Streams retain their existing TTLs; replay identity records remain small durable tombstones, including abandoned bootstraps. Automatic identity/checkpoint garbage collection is not implemented. Recovery after a commit-before-alarm crash is proven on reacquisition, not as an autonomous repair guarantee.
+The replay checkpoint stores cumulative kills, deaths, items and secrets plus the last engine counters and any unfinished input record. An engine cache miss rebuilds from recorded inputs at tic zero; it never restores player-uploaded heaps. Fork scores include the inherited timeline. RNG drift makes `verified: false` permanently for that replay without stopping later frames; transport failures remain binding failures with retries. Verification checks engine identity and per-tic RNG, not player authenticity.
+
+The producer emits each visible-stat change and each 175-tic bucket (five seconds at 35 tics/s), independently of projection unit size. The last score can therefore trail the internal projected tic by up to 174 tics during unchanged play. A separate wall-clock timer publishes the latest checkpoint row with `live: false` after 30 seconds without input and releases its engine. Resumed play becomes live on its next qualifying stats publication. Cache rebuild cost grows with retained history; no trusted server snapshot accelerator is implemented.
+
+`maxMessageSize: 2_000_000` leaves room for snapshots while retaining the tested SQLite envelope. Both hosts share an origin with their client; Bun also retains its development CORS headers. V2 sessions, manifests and replay wakes use absolute expiry 24 hours after creation, including each fork; reading or appending does not extend that deadline. Legacy routes retain sliding TTL, and snapshots/indexes and lobby/scores keep their existing TTLs; replay identity records remain small durable tombstones, including abandoned bootstraps. Automatic identity/checkpoint garbage collection is not implemented. Recovery after a commit-before-alarm crash is proven on reacquisition, not as an autonomous repair guarantee.
 
 For a future **approved** test deployment, first create the public source repository and configure its corresponding-source link, then build:
 
@@ -116,7 +120,7 @@ bun run typecheck
 bun run test
 ```
 
-The suite verifies the two-alarm chain, duplicate wakes, immutable replay bootstrap, restart recovery, sink initialization retries, public access policies, family ownership, and 5,000-tic deterministic capture/replay on legacy and v2 paths, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
+The suite verifies zero idle SQL activity on Bun and on all three workerd owner types, real idle timers and resume, server stats matching Bun/workerd across deaths and level restarts, byte/unit-size independence, trusted cache rebuilds, inherited fork scores, lost producer responses, the two-alarm chain, duplicate wakes, immutable replay bootstrap, restart recovery, sink initialization retries, public access policies, family ownership, and 5,000-tic deterministic capture/replay on legacy and v2 paths, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
 
 This is an unauthenticated demo, with no load test or unlimited archive guarantee. Important limits:
 

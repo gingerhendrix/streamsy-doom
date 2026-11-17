@@ -67,22 +67,34 @@ recording; existing legacy IDs keep their original paths, including native forks
 | `doom/v2/snapshots/:id/:tic` | unchanged gzip snapshot | `game:<family>` |
 | `doom/v2/replay-wake/:id` | State wake rows, publicly read-only | `replay:<id>` |
 | `doom/v2/lobby` | State `session` collection, current SessionRow fields | `lobby:v2` |
-| `doom/v2/scores` | State `stats` collection, `{id, tic}`, publicly read-only | `lobby:v2` |
+| `doom/v2/scores` | State `stats` collection, server replay fields below, publicly read-only | `lobby:v2` |
 
 Declarations in `v2.ts` use the published Streamsy 0.12.0 APIs. Cloudflare links
 and routing share `apps/host-cloudflare/topology.ts`. The replay host stores its
 identity before acquisition, attaches a concrete parameter-free local wake
-trigger, and reads the family's bytes remotely. Its deterministic counter saves
-an unfinished header or frame in its checkpoint; producer output retries retain
-the same sequence. It does not run Doom or verify gameplay yet. Bun attaches the
-same counter locally. Reserved `/__…` mounts are never public.
+trigger, and reads the family's bytes remotely. The deterministic stats projection
+retains an unfinished header/frame and cumulative counters in its checkpoint. It
+replays the engine, accumulates kills/items/secrets across resets and alive→dead
+transitions, and publishes health, armor, level totals, episode/map, weapon/ammo,
+`alive`, `verified`, `live`, `tic` and `updatedTic`. RNG drift is a sticky unverified
+verdict; transport failures retain the projection retry path. `Commit.producer`
+retries preserve the producer sequence, including a lost sink response.
+
+Rows emit for visible changes or a 175-tic bucket; every qualifying tic within a
+unit emits, so page/unit boundaries do not alter the row sequence. `tic` and
+`updatedTic` identify that published engine observation; the durable checkpoint
+also stores later projected tics that did not qualify for publication. A separate
+`Commit.atLeastOnce` timer publishes the latest settled row with `live: false`
+after 30 seconds without input. Resumed input is live on its next qualifying
+publication. An engine cache miss replays inputs from zero to the checkpoint;
+player snapshots never enter score recovery. Forks include inherited stats.
+Bun attaches the same projections locally. Reserved `/__…` mounts are never public.
 
 `Lobby` folds both namespaces for compatibility, including a missing namespace.
 The browser follows both while keeping its existing table. For this batch it
-continues publishing client tic counts/status in session metadata. The server's
-placeholder count lives separately in scores. Delete still removes snapshots,
+continues publishing client tic counts/status in session metadata. Server-derived stats live separately in scores. Delete still removes snapshots,
 index and manifest and writes a deleted session row; frame history stays until
-TTL. Identity tombstones/checkpoints have no application garbage collector yet.
+expiry. Identity tombstones/checkpoints have no application garbage collector yet.
 
 Workerd topology tests build only the Worker and use no cloud credentials. Test
 bundles, SQLite state and logs go under the batch scratch directory; override its
@@ -91,8 +103,14 @@ objects, which restores pending alarms; it does not prove autonomous crash repai
 
 ## Stored paths and formats
 
-The legacy table below remains unchanged. V2 frames, manifests, lobby, wakes and
-scores use 43200 seconds; v2 snapshots and indexes use 86400 seconds.
+The legacy table below remains unchanged. V2 frames, manifests and replay wakes
+have absolute `Stream-Expires-At` deadlines 24 hours after creation and no
+`Stream-TTL`; forks get their own creation deadline. Protocol reads with sliding
+TTL commit lifecycle touches in 0.12.0, which would requeue attached projections;
+absolute expiry prevents that feedback. The client and both replay bootstrap
+hosts use this policy. V2 lobby/scores retain 43200-second sliding TTL; snapshots
+and indexes retain 86400-second sliding TTL. Watching cannot extend a v2 frame
+stream's 24-hour life.
 
 | Path | Content | TTL seconds |
 | --- | --- | ---: |
