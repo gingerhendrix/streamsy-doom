@@ -3,12 +3,12 @@ import { isFamilyId } from "./ids";
 export const absoluteExpiry = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 export const projectionReadPath = (path: string) => /^doom\/v2\/(sessions|batches|replay-wake|events)\//.test(path);
 export const binary = "application/octet-stream";
-export const sessionPath = (id: string) => `${isFamilyId(id) ? "doom/v2" : "doom"}/sessions/${validId(id)}`;
-export const batchPath = (id: string) => `${isFamilyId(id) ? "doom/v2" : "doom"}/batches/${validId(id)}`;
-export const indexPath = (id: string) => isFamilyId(id) ? `doom/v2/snapshot-index/${id}` : `doom/snapshots/${validId(id)}-idx`;
-export const snapshotPath = (id: string, tic: number) => isFamilyId(id) ? `doom/v2/snapshots/${id}/${uint32(tic)}` : `doom/snapshots/${validId(id)}-${uint32(tic)}`;
+export const sessionPath = (id: string) => `doom/v2/sessions/${validId(id)}`;
+export const batchPath = (id: string) => `doom/v2/batches/${validId(id)}`;
+export const indexPath = (id: string) => `doom/v2/snapshot-index/${validId(id)}`;
+export const snapshotPath = (id: string, tic: number) => `doom/v2/snapshots/${validId(id)}/${uint32(tic)}`;
 export function validId(id: string) {
-  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error("Invalid session id");
+  if (!isFamilyId(id)) throw new Error("Invalid v2 session id");
   return id;
 }
 export function uint32(value: number) {

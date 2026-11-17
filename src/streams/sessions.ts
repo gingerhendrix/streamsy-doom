@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { ProtocolClient, batchPath, binary, concat, encode, offsetOf, sessionPath, uint32 } from "./protocol";
-import { isFamilyId, familyOf, newSessionId, newForkId, assertForkFamily } from "./ids";
-import { Lobby, type SessionRow } from "./lobby";
+import { familyOf, newSessionId, newForkId, assertForkFamily } from "./ids";
+import { Lobby } from "./lobby";
+import type { SessionMetadata } from "./v2";
 import { SnapshotStore, type Identity, type ReplayEngine } from "./snapshots";
 export interface SessionHeader extends Identity { formatVersion: 1; forkedFrom: string | null; forkTic: number | null }
 export interface BatchBoundary { startTic: number; endTic: number; before: string; after: string }
@@ -9,11 +10,13 @@ interface Manifest { headerOffset?: string; batch?: BatchBoundary }
 export class SessionWriter {
   readonly batches: BatchBoundary[] = [];
   private busy = false;
-  constructor(readonly client: ProtocolClient, readonly row: SessionRow, public offset: string, readonly snapshotInterval = 4200) {
+  private tickCount: number;
+  constructor(readonly client: ProtocolClient, public row: SessionMetadata, public offset: string, readonly snapshotInterval = 4200) {
+    this.tickCount = row.forkTic ?? 0;
     if (!Number.isInteger(snapshotInterval) || snapshotInterval < 1) throw new Error("Invalid snapshot interval");
   }
-  get tic() { return this.row.tickCount; }
-  async append(frames: Uint8Array[], options: { publishLobby?: boolean } = {}) {
+  get tic() { return this.tickCount; }
+  async append(frames: Uint8Array[]) {
     if (this.busy) throw new Error("Writer already in use");
     if (!frames.length || frames.some(frame => frame.length !== 9)) throw new Error("Expected nonempty batch of 9-byte frames");
     uint32(this.tic + frames.length);
@@ -23,10 +26,9 @@ export class SessionWriter {
       const response = await this.client.append(sessionPath(this.row.id), concat(frames), binary, { "Stream-Expected-Offset": before });
       this.offset = offsetOf(response);
       const batch = { startTic: this.tic, endTic: this.tic + frames.length, before, after: this.offset };
-      this.row.tickCount = batch.endTic;
+      this.tickCount = batch.endTic;
       this.batches.push(batch);
       await this.client.append(batchPath(this.row.id), JSON.stringify([{ batch }]), "application/json");
-      if (!isFamilyId(this.row.id) && options.publishLobby !== false) await new Lobby(this.client).put(this.row);
       return batch;
     } finally { this.busy = false; }
   }
@@ -44,22 +46,22 @@ export class SessionWriter {
     for (const checkpoint of checkpoints) await store.write(checkpoint);
     return batch;
   }
-  async end() { this.row.status = "ended"; await new Lobby(this.client).put(this.row); }
+  async end() { this.row = { ...this.row, ended: true }; await new Lobby(this.client).put(this.row); }
 }
 export async function createSession(client: ProtocolClient, options: {
-  id?: string; legacy?: boolean; playerName: string; identity: Identity; snapshotInterval?: number;
+  id?: string; playerName: string; identity: Identity; snapshotInterval?: number;
 }) {
-  const id = options.id ?? (options.legacy ? crypto.randomUUID() : newSessionId());
-  if (!options.legacy) familyOf(id);
+  const id = options.id ?? newSessionId();
+  familyOf(id);
   const header: SessionHeader = { ...options.identity, formatVersion: 1, forkedFrom: null, forkTic: null };
   const lobby = new Lobby(client); await lobby.init();
-  if (isFamilyId(id)) await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
+  await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
   const response = await client.create(sessionPath(id), encode(header));
   const offset = offsetOf(response);
   await client.create(batchPath(id), JSON.stringify([{ headerOffset: offset }]), "application/json");
   await new SnapshotStore(client, id).init();
-  const row: SessionRow = { id, playerName: options.playerName, skill: header.skill, episode: header.episode, map: header.map,
-    createdAt: new Date().toISOString(), status: "playing", tickCount: 0, forkedFrom: null, forkTic: null };
+  const row: SessionMetadata = { id, playerName: options.playerName, skill: header.skill, episode: header.episode, map: header.map,
+    createdAt: new Date().toISOString(), ended: false, forkedFrom: null, forkTic: null };
   await lobby.put(row);
   return new SessionWriter(client, row, offset, options.snapshotInterval);
 }
@@ -122,12 +124,10 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   id?: string; playerName: string; snapshotInterval?: number;
 }) {
   uint32(tic);
-  const id = options.id ?? (isFamilyId(parentId) ? newForkId(parentId) : crypto.randomUUID());
+  const id = options.id ?? newForkId(parentId);
   // Validate before bootstrap, lobby initialization, or any protocol PUT.
-  if (isFamilyId(parentId)) assertForkFamily(parentId, id);
-  else if (isFamilyId(id)) throw new Error("Cannot fork legacy recording into v2");
+  assertForkFamily(parentId, id);
   const lobby = new Lobby(client), parent = await lobby.get(parentId);
-  if (parent.status === "deleted") throw new Error("Invalid fork point");
   const manifest = await client.json<Manifest>(batchPath(parentId));
   const headerOffset = manifest.find(record => record.headerOffset)?.headerOffset;
   if (!headerOffset) throw new Error("Missing header boundary");
@@ -137,7 +137,7 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   const boundary = tic === 0 ? headerOffset : batches.find(batch => batch.endTic === tic)?.after;
   const offset = inside?.before ?? boundary;
   if (!offset) throw new Error("Missing fork batch boundary");
-  if (isFamilyId(id)) await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
+  await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
   const headers: Record<string, string> = { "Stream-Forked-From": `/${sessionPath(parentId)}`, "Stream-Fork-Offset": offset };
   if (inside) headers["Stream-Fork-Sub-Offset"] = String((tic - inside.startTic) * 9);
   const response = await client.create(sessionPath(id), "", binary, 43200, headers);
@@ -149,14 +149,13 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   for (let i = 0; i < childBatches.length; i += 1000)
     await client.append(batchPath(id), JSON.stringify(childBatches.slice(i, i + 1000)), "application/json");
   await new SnapshotStore(client, parentId).forkTo(id, tic);
-  const row: SessionRow = { ...parent, id, playerName: options.playerName, tickCount: tic, status: "playing",
+  const row: SessionMetadata = { ...parent, id, playerName: options.playerName, ended: false,
     createdAt: new Date().toISOString(), forkedFrom: parentId, forkTic: tic };
   await lobby.put(row);
   return new SessionWriter(client, row, childOffset, options.snapshotInterval);
 }
 export async function deleteSession(client: ProtocolClient, id: string) {
   const lobby = new Lobby(client), row = await lobby.get(id);
-  if (row.status === "deleted") return;
   await new SnapshotStore(client, id).delete();
   await client.remove(batchPath(id));
   await lobby.delete(row);

@@ -62,6 +62,16 @@ test("Bun browser fallback receives server scores; v2 lifecycle writes metadata 
     const sessions = new StateRows<SessionMetadata>("session"); sessions.apply(events);
     expect(sessions.rows.get(writer.row.id)?.ended).toBe(true);
     expect(sessions.rows.get(child.row.id)?.forkTic).toBe(10);
+    expect(writer.tic).toBe(175);
+    expect(child.tic).toBe(10);
+    await child.append(frames.slice(10, 20));
+    expect(child.tic).toBe(20);
+    const grandchild = await forkSession(client, child.row.id, 15, { playerName: "Grandchild" });
+    expect(grandchild.tic).toBe(15);
+    await grandchild.append(frames.slice(15, 18));
+    expect(grandchild.tic).toBe(18);
+    expect(await new Lobby(client).get(grandchild.row.id)).not.toHaveProperty("tickCount");
+    expect(await new Lobby(client).get(grandchild.row.id)).not.toHaveProperty("status");
     await deleteSession(client, child.row.id);
     const deleted = await client.json<StateEvent<SessionMetadata>>("doom/v2/lobby");
     expect(deleted.at(-1)).toMatchObject({ type: "session", key: child.row.id, headers: { operation: "delete" } });

@@ -4,9 +4,8 @@ import type { DurableObjectNamespace, DurableObjectState, ExecutionContext, Inco
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 import { Http, Streamsy } from "@streamsy/core";
-import { routes, type StreamsReader, type StreamsWriter } from "@streamsy/core/protocol";
 import { CheckpointStore, ProjectionWakeup } from "@streamsy/projection";
-import { Placement, StreamsyObject, router, type ObjectInstance } from "@streamsy/serve/cloudflare";
+import { StreamsyObject, router, type ObjectInstance } from "@streamsy/serve/cloudflare";
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
 import { familyOf } from "../../src/streams/ids";
 import { familyStreams, lobbyStreams, ReplayWake, LobbyStream, Scores, Sessions } from "../../src/streams/v2";
@@ -17,11 +16,11 @@ import { serverEngine } from "./engine";
 import { placement, framesLink, wakeLink, scoresLink } from "./topology";
 
 export interface Env { STREAMS: DurableObjectNamespace; GAMES: DurableObjectNamespace; REPLAYS: DurableObjectNamespace; LOBBY: DurableObjectNamespace; ASSETS: Fetcher }
-// Retain this class, namespace and object name for all legacy recordings.
-export const DoomStreams = StreamsyObject.make<Env, StreamsReader | StreamsWriter>({
-  app: routes({ prefix: "/", maxMessageSize: 2_000_000 }),
-  layer: state => DurableObjectStorage.layerProtocol({ client: { storage: state.storage }, longPollTimeoutMs: 20_000 }),
-});
+// Retain the deployed class/binding identity until a provider migration is reviewed.
+// It never acquires storage or serves the removed protocol namespace.
+export class DoomStreams {
+  async fetch(): Promise<Response> { return new Response(null, { status: 404 }); }
+}
 const gameLayer = (state: DurableObjectState) => CheckpointStore.layer.pipe(
   Layer.provideMerge(DurableObjectStorage.layer(familyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 })),
 );
@@ -97,7 +96,6 @@ export class DoomReplay {
   }
   async alarm(): Promise<void> { await this.ready; await this.acquire().alarm(); }
 }
-const legacy = router<Env>({ prefix: "/", placement: Placement.byKey(() => "doom"), namespace: env => env.STREAMS });
 const games = router<Env>({ prefix: "/", placement, namespace: env => env.GAMES });
 const replays = router<Env>({ prefix: "/", placement, namespace: env => env.REPLAYS });
 const lobby = router<Env>({ prefix: "/", placement, namespace: env => env.LOBBY });
@@ -118,6 +116,6 @@ export default {
       const target = owner.startsWith("game:") ? games : owner.startsWith("replay:") ? replays : lobby;
       return target.fetch!(request, env, context);
     }
-    return path.startsWith("/doom/") ? legacy.fetch!(request, env, context) : env.ASSETS.fetch(request);
+    return path.startsWith("/doom/") ? new Response(null, { status: 404 }) : env.ASSETS.fetch(request);
   },
 };

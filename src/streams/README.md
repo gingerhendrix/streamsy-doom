@@ -29,8 +29,8 @@ POSTs the entire frame batch, then persists the checkpoints. The default snapsho
 interval is 4200 tics. `append` only persists frames; callers using it directly
 use `SnapshotStore.write(engine.snapshot())` at their chosen boundaries.
 V2 frame appends write no lobby progress; `writer.tic` stays local and server
-scores own published progress. Legacy callers retain per-append lobby writes
-unless `publishLobby: false` is supplied. Fork validation uses the persisted
+scores own published progress. `writer.row` and `Lobby` use `SessionMetadata`
+directly, without progress fields. Fork validation uses the persisted
 batch manifest, so no browser progress heartbeat is needed.
 Call writer methods sequentially and use one writer per session. Expected-offset
 appends reject competing/stale writers. A failed network or metadata operation
@@ -51,13 +51,13 @@ target, and replays the remainder. It validates engine identity first. A seek
 before the first checkpoint requires a fresh engine at tic 0. Snapshots are
 trusted, build-specific linear-memory state; use only matching WAD/build/settings.
 
-## V2 topology and compatibility
+## V2 topology
 
 `createSession` generates `<32 lowercase hex>_<32 lowercase hex>` IDs and calls
 `POST doom/v2/bootstrap/:id` before creating the frame stream. A fork copies its
 parent's family, including forks of forks. A supplied different-family child ID
-fails before any request. Use `{ legacy: true }` only to explicitly create a legacy
-recording; existing legacy IDs keep their original paths, including native forks.
+fails before any request. Path helpers reject every ID outside this exact grammar.
+Both hosts reject the removed namespace under `/doom/*` with 404.
 
 | V2 path | Content | Cloudflare owner |
 | --- | --- | --- |
@@ -90,10 +90,10 @@ publication. An engine cache miss replays inputs from zero to the checkpoint;
 player snapshots never enter score recovery. Forks include inherited stats.
 Bun attaches the same projections locally. Reserved `/__…` mounts are never public.
 
-`Lobby` folds both namespaces, including a missing namespace. V2 writes only the
+`Lobby` folds the State session collection, including a missing stream. It writes the
 `session` collection on create, fork and end, and a State delete on removal.
 The browser joins it with server-owned `stats`, hides scores without session
-metadata, and lists legacy recordings separately. `StateRows` folds upserts,
+metadata. `StateRows` folds upserts,
 partial updates, deletes, resets and snapshot controls. `followJson` catches up
 via HTTP and follows Cloudflare lobby/scores over `streamsy-live.v1` WebSockets,
 with long-poll fallback on unsupported/failed upgrades. Binary batches are applied
@@ -113,7 +113,7 @@ objects, which restores pending alarms; it does not prove autonomous crash repai
 
 ## Stored paths and formats
 
-The legacy table below remains unchanged. V2 frames, manifests and replay wakes
+V2 frames, manifests and replay wakes
 have absolute `Stream-Expires-At` deadlines 24 hours after creation and no
 `Stream-TTL`; forks get their own creation deadline. Protocol reads with sliding
 TTL commit lifecycle touches in 0.12.0, which would requeue attached projections;
@@ -122,13 +122,15 @@ hosts use this policy. V2 lobby/scores retain 43200-second sliding TTL; snapshot
 and indexes retain 86400-second sliding TTL. Watching cannot extend a v2 frame
 stream's 24-hour life.
 
-| Path | Content | TTL seconds |
-| --- | --- | ---: |
-| `doom/sessions/<id>` | JSON header line, then 9-byte frames; binary | 43200 |
-| `doom/batches/<id>` | JSON records with real append offsets and tic ranges | 43200 |
-| `doom/snapshots/<id>-<tic>` | gzip of metadata JSON line + version 2 heap delta; closed binary stream | 86400 |
-| `doom/snapshots/<id>-idx` | repeated `(tic u32 LE, compressed size u32 LE)` | 86400 |
-| `doom/lobby` | JSON session rows, folded by id, latest row wins | 43200 |
+| Path | Content | Expiry |
+| --- | --- | --- |
+| `doom/v2/sessions/<id>` | JSON header line, then 9-byte frames; binary | Absolute, 24 hours |
+| `doom/v2/batches/<id>` | JSON records with real append offsets and tic ranges | Absolute, 24 hours |
+| `doom/v2/replay-wake/<id>` | State wake rows | Absolute, 24 hours |
+| `doom/v2/snapshots/<id>/<tic>` | gzip of metadata JSON line + version 2 heap delta; closed binary stream | Sliding, 86400 seconds |
+| `doom/v2/snapshot-index/<id>` | repeated `(tic u32 LE, compressed size u32 LE)` | Sliding, 86400 seconds |
+| `doom/v2/lobby` | State session metadata | Sliding, 43200 seconds |
+| `doom/v2/scores` | State server stats | Sliding, 43200 seconds |
 
 The session header contains `formatVersion: 1`, snapshot identity `version: 2`,
 WAD SHA-256, WASM build SHA-256, skill, episode, map, `forkedFrom`, and `forkTic`.
@@ -161,7 +163,7 @@ lobby folds re-read with this cache policy and paginate until up-to-date; they d
 not trust a cached first response. Offsets remain opaque throughout.
 
 Delete removes that session's snapshots, index and batch manifest, then deletes its
-v2 State session row (legacy keeps its deleted tombstone). Scores are publicly
+State session row. Scores are publicly
 read-only, so stale score rows can remain without visible session metadata. The binary session
 stays readable until TTL; a deleted session cannot be forked via this API. Parent
 snapshots remain readable after deleting child snapshot forks. `writer.end()`
@@ -175,6 +177,6 @@ unindexed snapshot or a frame batch without manifest metadata, and creation/fork
 can leave partial resources. There is no crash-repair/retry or multi-writer
 coordination service in this batch. Do not fork sessions with incomplete metadata.
 Readers and manifests are held in memory; this is a small demo, not an unbounded
-archive. The legacy lobby uses whole-row events; v2 uses State upserts with one browser writer per session and a separate server-owned scores stream.
+archive. The lobby uses State upserts with one browser writer per session and a separate server-owned scores stream.
 Snapshot compression is synchronous; measured E1M1 sizes are below the cap but
 other maps, WADs or engine builds can exceed it and are rejected before upload.

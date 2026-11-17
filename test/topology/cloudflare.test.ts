@@ -50,7 +50,7 @@ async function harness() {
     async restart() { await mf.dispose(); mf = start(); await mf.ready; }, async stop() { await mf.dispose(); } };
 }
 
-test("workerd: family placement, mid-batch/snapshot forks, seeks, delete, legacy and access policies", async () => {
+test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and access policies", async () => {
   const h = await harness();
   try {
     const parent = await createSession(h.client, { playerName: "Parent", identity });
@@ -108,12 +108,13 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete, legacy
     for (const path of [snapshotPath(child.row.id, 5), batchPath(child.row.id), indexPath(child.row.id)]) expect((await h.send(path, { method: "HEAD" })).status).toBe(404);
     expect((await h.send(snapshotPath(parent.row.id, 5), { method: "HEAD" })).status).toBe(200);
     expect((await h.send(sessionPath(child.row.id), { method: "HEAD" })).status).toBe(200);
-    const legacy = await createSession(h.client, { legacy: true, id: "old-game", playerName: "Old", identity });
-    await legacy.append([new Uint8Array(9)]);
-    const legacyChild = await forkSession(h.client, legacy.row.id, 1, { playerName: "Old fork" });
-    expect(sessionPath(legacyChild.row.id)).toStartWith("doom/sessions/");
-    expect(await h.runtime().listDurableObjectIds("STREAMS")).toHaveLength(1);
-    expect((await new SessionReader(h.client, legacyChild.row.id).catchUp()).frames).toHaveLength(1);
+    for (const path of ["doom/lobby", "doom/sessions/old-game", "doom/arbitrary"]) {
+      for (const method of ["GET", "HEAD", "PUT", "POST", "DELETE"]) expect((await h.send(path, { method })).status).toBe(404);
+    }
+    expect(await h.runtime().listDurableObjectIds("STREAMS")).toHaveLength(0);
+    const retired = await h.stub("STREAMS", "doom");
+    expect((await retired.fetch("https://internal/doom/sessions/old-game", { method: "PUT" })).status).toBe(404);
+    expect((await retired.fetch("https://internal/doom/sessions/old-game")).status).toBe(404);
   } finally { await h.stop(); }
 }, 60000);
 
@@ -263,7 +264,7 @@ test("workerd: steady five-tic frame commits publish scores through both alarm h
     for (let at = 0; at < log.frames.length; at += 5) {
       const next = replayPages(state, log.frames.slice(at, at + 5), engine, writer.row.id); state = next.state;
       const started = performance.now();
-      await writer.append(log.frames.slice(at, at + 5), { publishLobby: false });
+      await writer.append(log.frames.slice(at, at + 5));
       append.push(performance.now() - started);
       const expected = next.rows.at(-1);
       if (!expected) continue; // The sparse publication rule deliberately emits nothing here.

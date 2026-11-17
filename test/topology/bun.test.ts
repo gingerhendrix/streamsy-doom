@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
 import { startHost } from "../../apps/host-bun/host";
-import { ProtocolClient, createSession, forkSession, familyOf, sessionPath, Lobby } from "../../src/streams";
+import { ProtocolClient, createSession, forkSession, familyOf, sessionPath, batchPath, indexPath, snapshotPath, deleteSession, Lobby } from "../../src/streams";
 import { recording } from "../helpers/recording";
 const { identity, frames } = await recording(350, false);
 test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mounts", async () => {
@@ -9,13 +9,22 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
   let requests = 0;
   const client = new ProtocolClient(host.url, (input, init) => { requests++; return fetch(input, init); });
   try {
-    await expect(createSession(client, { id: "invalid", playerName: "Bad", identity })).rejects.toThrow("Invalid v2");
-    expect(requests).toBe(0);
-    const legacyRow = { id: "legacy-only", playerName: "Old", skill: 3, episode: 1, map: 1,
-      createdAt: "2026-11-17", status: "playing" as const, tickCount: 0, forkedFrom: null, forkTic: null };
-    await client.create("doom/lobby", JSON.stringify([legacyRow]), "application/json");
-    // A direct old watch URL must work before any v2 lobby has been created.
-    expect(await new Lobby(client).get(legacyRow.id)).toEqual(legacyRow);
+    const valid = "a".repeat(32) + "_" + "1".repeat(32);
+    for (const id of ["invalid", "old-game", valid.toUpperCase(), valid + "0", valid.replace("_", "-"), "../escape"]) {
+      for (const path of [sessionPath, batchPath, indexPath, (id: string) => snapshotPath(id, 1)]) expect(() => path(id)).toThrow("Invalid v2");
+      await expect(createSession(client, { id, playerName: "Bad", identity })).rejects.toThrow("Invalid v2");
+      await expect(forkSession(client, valid, 0, { id, playerName: "Bad" })).rejects.toThrow("Invalid v2");
+      await expect(forkSession(client, id, 0, { playerName: "Bad" })).rejects.toThrow("Invalid v2");
+      await expect(deleteSession(client, id)).rejects.toThrow("Invalid v2");
+      expect(requests).toBe(0);
+    }
+    for (const path of ["doom/lobby", "doom/sessions/old-game", "doom/arbitrary", "game.wad", "freedoom/COPYING.txt"]) {
+      for (const method of ["GET", "HEAD", "PUT", "POST", "DELETE"]) {
+        const response = await fetch(new URL(path, host.url), { method });
+        expect(response.status).toBe(path.startsWith("doom/") || method === "GET" || method === "HEAD" ? 404 : 405);
+      }
+    }
+    expect(await new Lobby(client).rows()).toEqual([]);
     const writer = await createSession(client, { playerName: "Bun", identity });
     await writer.append(frames.slice(0, 175));
     let rows: { value: { tic: number } }[] = [];
@@ -86,7 +95,5 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
       if (n === 99) throw new Error("Bun replay did not resume after idle eviction");
       await Bun.sleep(10);
     }
-    const legacy = await createSession(client, { legacy: true, playerName: "Legacy TTL", identity });
-    expect((await client.request(sessionPath(legacy.row.id), { method: "HEAD" })).headers.get("Stream-TTL")).toBe("43200");
   } finally { await host.stop(); Database.prototype.query = query; }
 }, 40000);

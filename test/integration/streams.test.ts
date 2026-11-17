@@ -13,10 +13,10 @@ const build = fileURLToPath(new URL("../../engine/build/", import.meta.url));
 const missing = [wadPath, ...["doom.js", "doom.wasm", "build-id.js"].map(name => build + name)].filter(path => !existsSync(path));
 if (missing.length) console.warn(`SKIP real-engine stream integration: missing ${missing.join(", ")}. Run bun run fetch-wad && bun run build:engine, or set DOOM_WAD.`);
 
-for (const v2 of [false, true]) test.skipIf(missing.length > 0)(`real WASM (${v2 ? "v2" : "legacy"}): 5000 tics, live tail, snapshot seek, mid-batch and chained forks, delete`, async () => {
-  const parent = v2 ? "a".repeat(32) + "_" + "1".repeat(32) : "parent";
-  const childId = v2 ? "a".repeat(32) + "_" + "2".repeat(32) : "child";
-  const grandchildId = v2 ? "a".repeat(32) + "_" + "3".repeat(32) : "grandchild";
+test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot seek, mid-batch and chained forks, delete`, async () => {
+  const parent = "a".repeat(32) + "_" + "1".repeat(32);
+  const childId = "a".repeat(32) + "_" + "2".repeat(32);
+  const grandchildId = "a".repeat(32) + "_" + "3".repeat(32);
   const requests: { method: string; path: string; status: number; headers: Headers; live: boolean }[] = [];
   const host = await startHost({ port: 0, database: ":memory:", longPollTimeoutMs: 50,
     onRequest(request, response) {
@@ -31,7 +31,7 @@ for (const v2 of [false, true]) test.skipIf(missing.length > 0)(`real WASM (${v2
     const wad = await Bun.file(wadPath).bytes(), wasmBinary = await Bun.file(build + "doom.wasm").bytes();
     const create = () => createEngine(wad, { wasmBinary, skill: 3, episode: 1, map: 1 });
     const player = await create();
-    const writer = await createSession(client, { legacy: !v2, id: parent, playerName: "Recorder", identity: player.identity, snapshotInterval: 1500 });
+    const writer = await createSession(client, { id: parent, playerName: "Recorder", identity: player.identity, snapshotInterval: 1500 });
     const liveReader = new SessionReader(client, parent);
     await liveReader.catchUp();
     const liveFrames: Uint8Array[] = [];
@@ -127,10 +127,9 @@ for (const v2 of [false, true]) test.skipIf(missing.length > 0)(`real WASM (${v2
     }
     expect((await client.request(sessionPath(childId), { method: "HEAD" })).status).toBe(200); // TTL policy
     expect((await client.request(snapshotPath(parent, 3000), { method: "HEAD" })).status).toBe(200);
-    if (v2) await expect(new Lobby(client).get(childId)).rejects.toThrow("Session missing");
-    else expect(await new Lobby(client).get(childId)).toMatchObject({ status: "deleted", forkedFrom: parent, forkTic, tickCount: forkTic + 53 });
+    await expect(new Lobby(client).get(childId)).rejects.toThrow("Session missing");
     await writer.end();
-    expect((await new Lobby(client).get(parent)).status).toBe("ended");
+    expect((await new Lobby(client).get(parent)).ended).toBe(true);
     const unexpected = requests.filter(request => request.status >= 400 && !(request.method === "HEAD" && request.status === 404));
     expect(unexpected).toEqual([]);
     const growingReads = requests.filter(request => request.method === "GET");
@@ -150,7 +149,7 @@ test("host: placeholder/static safety, CORS fork preflight and exposed headers, 
     expect((await fetch(new URL("/missing.js", host.url))).status).toBe(404);
     expect((await fetch(new URL("/%2e%2e%2fhost.ts", host.url))).status).toBe(404);
     expect((await fetch(new URL("/other/stream", host.url), { method: "PUT" })).status).toBe(405);
-    const path = new URL("doom/test", host.url), origin = "http://client.example";
+    const path = new URL(sessionPath("a".repeat(32) + "_" + "4".repeat(32)), host.url), origin = "http://client.example";
     const preflight = await fetch(path, { method: "OPTIONS", headers: {
       Origin: origin, "Access-Control-Request-Method": "PUT",
       "Access-Control-Request-Headers": "content-type,stream-forked-from,stream-fork-offset,stream-fork-sub-offset,stream-ttl",
@@ -162,31 +161,35 @@ test("host: placeholder/static safety, CORS fork preflight and exposed headers, 
     expect(create.status).toBe(201);
     expect(create.headers.get("Access-Control-Allow-Origin")).toBeTruthy();
     for (const name of exposedHeaders) expect(create.headers.get("Access-Control-Expose-Headers")?.toLowerCase()).toContain(name.toLowerCase());
-    const tooBig = await fetch(new URL("doom/large", host.url), { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(2_000_001) });
+    const tooBig = await fetch(new URL(snapshotPath("a".repeat(32) + "_" + "4".repeat(32), 1), host.url), { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(2_000_001) });
     expect(tooBig.status).toBe(413);
-    const fits = await fetch(new URL("doom/fits", host.url), { method: "PUT", headers: { "Content-Type": "application/octet-stream", "Stream-Closed": "true" }, body: new Uint8Array(2_000_000) });
+    const fits = await fetch(new URL(snapshotPath("a".repeat(32) + "_" + "4".repeat(32), 2), host.url), { method: "PUT", headers: { "Content-Type": "application/octet-stream", "Stream-Closed": "true" }, body: new Uint8Array(2_000_000) });
     expect(fits.status).toBe(201);
   } finally { await host.stop(); }
 });
 
-test("fresh clients: exact boundary, tic zero, inherited partial-batch fork and fresh index reads", async () => {
+test.skipIf(missing.length > 0)("fresh clients: exact boundary, tic zero, inherited partial-batch fork and fresh index reads", async () => {
   const host = await startHost({ port: 0, database: ":memory:" });
   try {
     const client = new ProtocolClient(host.url);
-    const identity = { version: 2, buildId: "test", wadSha256: "test", skill: 3, episode: 1, map: 1 };
-    const writer = await createSession(client, { legacy: true, id: "boundaries", playerName: "Test", identity });
-    await writer.append([new Uint8Array(9).fill(1), new Uint8Array(9).fill(2), new Uint8Array(9).fill(3)]);
-    await writer.append([new Uint8Array(9).fill(4), new Uint8Array(9).fill(5)], { publishLobby: false });
-    expect((await new Lobby(client).get("boundaries")).tickCount).toBe(3);
-    // The manifest, rather than the deliberately stale lobby count, permits tic 5 forks.
+    const { recording } = await import("../helpers/recording");
+    const { identity, frames } = await recording(1003, false);
+    const id = (n: number) => "b".repeat(32) + "_" + n.toString(16).padStart(32, "0");
+    const boundaries = id(1), partial = id(2), partialAgain = id(3), pagedId = id(4);
+    const writer = await createSession(client, { id: boundaries, playerName: "Test", identity });
+    await writer.append(frames.slice(0, 3));
+    await writer.append(frames.slice(3, 5));
+    expect(writer.tic).toBe(5);
+    expect(await new Lobby(client).get(boundaries)).not.toHaveProperty("tickCount");
+    // The durable manifest permits tic 5 forks without published progress.
     for (const tic of [0, 3, 5]) {
-      await forkSession(client, "boundaries", tic, { id: `at-${tic}`, playerName: "Test" });
-      expect((await new SessionReader(client, `at-${tic}`).catchUp()).frames.length).toBe(tic);
+      await forkSession(client, boundaries, tic, { id: id(10 + tic), playerName: "Test" });
+      expect((await new SessionReader(client, id(10 + tic)).catchUp()).frames.length).toBe(tic);
     }
-    await forkSession(client, "boundaries", 2, { id: "partial", playerName: "Test" });
-    await forkSession(client, "partial", 1, { id: "partial-again", playerName: "Test" });
-    expect((await new SessionReader(client, "partial-again").catchUp()).frames).toEqual([new Uint8Array(9).fill(1)]);
-    const store = new SnapshotStore(client, "boundaries");
+    await forkSession(client, boundaries, 2, { id: partial, playerName: "Test" });
+    await forkSession(client, partial, 1, { id: partialAgain, playerName: "Test" });
+    expect((await new SessionReader(client, partialAgain).catchUp()).frames).toEqual(frames.slice(0, 1));
+    const store = new SnapshotStore(client, boundaries);
     expect(await store.entries()).toEqual([]);
     await store.write({ ...identity, tic: 1, heap: new Uint8Array(64) });
     expect((await store.entries()).map(entry => entry.tic)).toEqual([1]);
@@ -195,14 +198,14 @@ test("fresh clients: exact boundary, tic zero, inherited partial-batch fork and 
     expect((await store.load((await store.entries())[1])).heap).toEqual(new Uint8Array(64).fill(2));
     // HTTP catch-up is capped at 1000 stored messages; boundaries must survive
     // aggregation and pagination independently of response chunking.
-    const paged = await createSession(client, { legacy: true, id: "paged", playerName: "Paging", identity });
-    for (let i = 0; i < 1003; i++) await paged.append([new Uint8Array(9).fill(i % 256)]);
-    const pagedReader = await new SessionReader(client, "paged").catchUp();
+    const paged = await createSession(client, { id: pagedId, playerName: "Paging", identity });
+    for (let i = 0; i < 1003; i++) await paged.append([frames[i]]);
+    const pagedReader = await new SessionReader(client, pagedId).catchUp();
     expect(pagedReader.frames.length).toBe(1003);
     expect(pagedReader.reads.length).toBeGreaterThan(1);
-    await forkSession(client, "paged", 1001, { id: "paged-fork", playerName: "Paged fork" });
-    expect((await new SessionReader(client, "paged-fork").catchUp()).frames).toEqual(pagedReader.frames.slice(0, 1001));
+    await forkSession(client, pagedId, 1001, { id: id(5), playerName: "Paged fork" });
+    expect((await new SessionReader(client, id(5)).catchUp()).frames).toEqual(pagedReader.frames.slice(0, 1001));
     await expect(writer.append([new Uint8Array(8)])).rejects.toThrow("9-byte");
-    await expect(forkSession(client, "boundaries", 6, { playerName: "Test" })).rejects.toThrow("Invalid fork point");
+    await expect(forkSession(client, boundaries, 6, { playerName: "Test" })).rejects.toThrow("Invalid fork point");
   } finally { await host.stop(); }
 });

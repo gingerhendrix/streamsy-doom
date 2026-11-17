@@ -7,7 +7,7 @@ import { isFamilyId } from "../../src/streams/ids";
 import { replayStats, replayIdle } from "../../src/projection/stats";
 import { ReplayEngines } from "../../src/projection/engines";
 import { serverEngine } from "./engine";
-import { Protocol, routes } from "@streamsy/core/protocol";
+import { Protocol } from "@streamsy/core/protocol";
 import { BunStorage } from "@streamsy/storage/bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { HttpRouter } from "effect/http";
@@ -33,9 +33,6 @@ export async function startHost(options: {
   const runtime = ManagedRuntime.make(Layer.merge(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines)));
   const context = await runtime.context();
   const cors = HttpRouter.cors({ exposedHeaders, maxAge: 0 });
-  const legacy = HttpRouter.toWebHandler(routes({ prefix: "/", maxMessageSize: 2_000_000 }).pipe(
-    Layer.provide(cors), Layer.provideMerge(Layer.succeedContext(context)),
-  ), { disableLogger: true });
   const v2 = HttpRouter.toWebHandler(Http.routes(allStreams, {
     prefix: "/", maxMessageSize: 2_000_000,
     access: stream => stream === Scores || stream === ReplayWake ? "read" : "full",
@@ -63,14 +60,9 @@ export async function startHost(options: {
         }
       }
       else if (url.pathname.startsWith("/doom/v2/")) response = await v2.handler(request);
-      else if (url.pathname.startsWith("/doom/")) response = await legacy.handler(request);
+      else if (url.pathname.startsWith("/doom/")) response = new Response(null, { status: 404 });
       else if (request.method !== "GET" && request.method !== "HEAD") response = new Response(null, { status: 405 });
-      else if (url.pathname === "/game.wad" || url.pathname === "/freedoom/COPYING.txt" || url.pathname === "/freedoom/CREDITS.txt") {
-        const data = fileURLToPath(new URL("../../engine/data/", import.meta.url));
-        const path = url.pathname === "/game.wad" ? (options.wadPath ?? process.env.DOOM_WAD ?? data + "freedoom1.wad") : data + url.pathname.split("/").at(-1);
-        const file = Bun.file(path);
-        response = await file.exists() ? new Response(request.method === "HEAD" ? null : file, { headers: { "Content-Type": file.type } }) : new Response(null, { status: 404 });
-      } else {
+      else {
         try {
           const path = await realpath(resolve(directory, "." + decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname)));
           if (!path.startsWith(directory + sep)) response = new Response(null, { status: 404 });
@@ -86,7 +78,7 @@ export async function startHost(options: {
   });
   return {
     url: server.url.toString(), server,
-    async stop() { await server.stop(true); await legacy.dispose(); await v2.dispose(); await runtime.dispose(); },
+    async stop() { await server.stop(true); await v2.dispose(); await runtime.dispose(); },
   };
 }
 if (import.meta.main) {

@@ -23,7 +23,6 @@ Browser client ───────────── same-origin HTTP ──�
   /doom/v2/replay-wake/<id>            internal producer wake rows (public read)
   /doom/v2/lobby                       browser-written State session rows
   /doom/v2/scores                      server-written verified State stats (public read)
-  /doom/*                             legacy paths, still on object doom
 ```
 
 Each frame is the classic eight-byte Doom command layout plus the post-tic `prndindex` RNG byte. Replayers inject the command and check RNG on every tic. Tests also compare diagnostic state hashes. The session header records the WAD and WASM SHA-256, skill, episode and map. New IDs contain two exact 32-character lowercase hexadecimal components. Forks inherit the family component, keeping frames and snapshots together for native forks.
@@ -47,7 +46,7 @@ bun run dev
 # http://127.0.0.1:3000/
 ```
 
-`dev` builds missing engine output, verifies/fetches Freedoom, rebuilds the web client and WAD parts, and starts the Bun SQLite host. `DOOM_STATIC_DIR=dist bun run dev:host` serves an existing build. Configure `PORT`, `HOST`, `DOOM_DB` (default `doom.sqlite`) and `DOOM_STATIC_DIR` as needed. Bun retains `/game.wad` and the legacy `/freedoom/` notices for compatibility; this client always uses `/wad/manifest.json`.
+`dev` builds missing engine output, verifies/fetches Freedoom, rebuilds the web client and WAD parts, and starts the Bun SQLite host. `DOOM_STATIC_DIR=dist bun run dev:host` serves an existing build. Configure `PORT`, `HOST`, `DOOM_DB` (default `doom.sqlite`) and `DOOM_STATIC_DIR` as needed. Both hosts serve game data through `/wad/manifest.json` and its parts and notices.
 
 `fetch-wad` downloads Freedoom Phase 1 0.13.0 and verifies pinned archive and IWAD hashes. Set `DOOM_WAD=/absolute/path/doom1.wad` on **each** fetch/build/dev/test command to use your own legally obtained IWAD. It is runtime data; the WASM does not need rebuilding. That override does not grant redistribution rights. Override builds omit Freedoom notices rather than attaching the wrong licence to your WAD; arrange any required notices and redistribution rights before publishing custom game data.
 
@@ -61,7 +60,7 @@ Choose a name and skill, then New game (E1M1). Click the canvas for keyboard foc
 
 Watch follows the stream live. Release the timeline slider to seek; the snapshot-to-target range appears below it. Follow live catches up again. Fork here opens a child at the displayed tic and starts recording new inputs. End game drains pending writes and returns to the lobby. Delete appears for sessions created by that browser, remembered in localStorage. It removes the child's snapshots/index/manifest and hides its row; the binary session is retained until TTL. This ownership UI provides no authorization.
 
-Frames flush in batches of about five tics through one serialized queue, which coalesces work behind slow writes. The screen shows pending frames and batch latency including metadata work. V2 lobby metadata publishes only on create, fork, end and delete; frame flushes write no lobby progress. A shared `#watch/<id>` URL always opens an observer, never another writer. The live lobby joins v2 State session metadata with server scores for map, health, armor, kills, deaths, verification and live state. It shows time since this tab received the published score; Watch also shows frame-to-score lag in tics and a projected-stats HUD. Legacy JSON sessions appear separately without stats. Cloudflare follows metadata and scores over hibernatable WebSockets; Bun and failed upgrades fall back to long poll from the last confirmed opaque offset.
+Frames flush in batches of about five tics through one serialized queue, which coalesces work behind slow writes. The screen shows pending frames and batch latency including metadata work. V2 lobby metadata publishes only on create, fork, end and delete; frame flushes write no lobby progress. A shared `#watch/<id>` URL always opens an observer, never another writer. The live lobby joins v2 State session metadata with server scores for map, health, armor, kills, deaths, verification and live state. It shows time since this tab received the published score; Watch also shows frame-to-score lag in tics and a projected-stats HUD. Cloudflare follows metadata and scores over hibernatable WebSockets; Bun and failed upgrades fall back to long poll from the last confirmed opaque offset.
 
 ## Cloudflare
 
@@ -80,7 +79,7 @@ The Alchemy **v2** stack is `apps/host-cloudflare/alchemy.run.ts`, pinned to `2.
 | --- | --- |
 | Stack | `streamsy-doom` |
 | Worker logical id | `Host` |
-| Legacy object logical id / exported class / binding | `Streams` / `DoomStreams` / `STREAMS` |
+| Inert compatibility object logical id / exported class / binding | `Streams` / `DoomStreams` / `STREAMS` |
 | Family storage | `Games` / `DoomGames` / `GAMES` |
 | Replay checkpoints and wake streams | `Replays` / `DoomReplay` / `REPLAYS` |
 | Lobby metadata and scores | `Lobby` / `DoomLobby` / `LOBBY` |
@@ -89,7 +88,7 @@ The Alchemy **v2** stack is `apps/host-cloudflare/alchemy.run.ts`, pinned to `2.
 
 Keep these identifiers and local Alchemy state across deployments; changing resource identity can replace persistent resources. `Alchemy.Stage` selects the stage. `workersDev` is enabled for non-prod stages; production needs a separately configured domain/route before it is reachable.
 
-Every request runs through the Worker. Legacy `/doom/*` paths retain `Placement.byKey(() => "doom")` and the original `DoomStreams` binding. V2 uses one shared `Placement.byRoute` table for public routing and internal object links: frames, manifests and snapshots go to `game:<family>`, wake streams to `replay:<id>`, and lobby/scores to `lobby:v2`. Alchemy derives additive SQLite class migrations from the three new bindings; retain its existing state when deploying.
+Every request runs through the Worker. Both hosts reject unsupported `/doom/*` paths with 404. The inert `DoomStreams` export and `STREAMS` binding retain resource identity until a provider migration is reviewed. V2 uses one shared `Placement.byRoute` table for public routing and internal object links: frames, manifests and snapshots go to `game:<family>`, wake streams to `replay:<id>`, and lobby/scores to `lobby:v2`. Retain the existing Alchemy resource identities and state.
 
 The client calls `POST /doom/v2/bootstrap/<id>` before creating frames, including forks. The Worker first initializes scores, then the replay owner durably saves its immutable ID and acquires a Streamsy host with a fixed local wake trigger. Frame commits schedule a family alarm to publish wakes; the receiving replay alarm reads remote bytes and runs the headless engine and publishes deterministic stats using producer delivery. Internal `/__frames`, `/__wake` and `/__scores` routes are reachable only through object stubs. Public requests under `/__…` return 404; scores and wakes are publicly read-only. Bun serves the same v2 API with locally attached stats and idle projections over its single SQLite store.
 
@@ -97,7 +96,7 @@ The replay checkpoint stores cumulative kills, deaths, items and secrets plus th
 
 The producer emits each visible-stat change and each 175-tic bucket (five seconds at 35 tics/s), independently of projection unit size. The last score can therefore trail the internal projected tic by up to 174 tics during unchanged play. A separate wall-clock timer publishes the latest checkpoint row with `live: false` after 30 seconds without input and releases its engine. Resumed play becomes live on its next qualifying stats publication. Cache rebuild cost grows with retained history; no trusted server snapshot accelerator is implemented.
 
-`maxMessageSize: 2_000_000` leaves room for snapshots while retaining the tested SQLite envelope. Both hosts share an origin with their client; Bun also retains its development CORS headers. V2 sessions, manifests and replay wakes use absolute expiry 24 hours after creation, including each fork; reading or appending does not extend that deadline. Legacy routes retain sliding TTL, and snapshots/indexes and lobby/scores keep their existing TTLs; replay identity records remain small durable tombstones, including abandoned bootstraps. Automatic identity/checkpoint garbage collection is not implemented. Recovery after a commit-before-alarm crash is proven on reacquisition, not as an autonomous repair guarantee.
+`maxMessageSize: 2_000_000` leaves room for snapshots while retaining the tested SQLite envelope. Both hosts share an origin with their client; Bun also retains its development CORS headers. V2 sessions, manifests and replay wakes use absolute expiry 24 hours after creation, including each fork; reading or appending does not extend that deadline. Snapshots/indexes and lobby/scores keep their existing sliding TTLs; replay identity records remain small durable tombstones, including abandoned bootstraps. Automatic identity/checkpoint garbage collection is not implemented. Recovery after a commit-before-alarm crash is proven on reacquisition, not as an autonomous repair guarantee.
 
 For a future **approved** test deployment, first create the public source repository and configure its corresponding-source link, then build:
 
@@ -120,12 +119,12 @@ bun run typecheck
 bun run test
 ```
 
-The suite verifies State upsert/update/delete folds, metadata-only v2 lifecycle writes, read-only scores, live replay-chain scores over WebSockets and long poll, Bun upgrade fallback, zero idle SQL activity on Bun and on all three workerd owner types, real idle timers and resume, server stats matching Bun/workerd across deaths and level restarts, byte/unit-size independence, trusted cache rebuilds, inherited fork scores, lost producer responses, the two-alarm chain, duplicate wakes, immutable replay bootstrap, restart recovery, sink initialization retries, public access policies, family ownership, and 5,000-tic deterministic capture/replay on legacy and v2 paths, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
+The suite verifies State upsert/update/delete folds, metadata-only v2 lifecycle writes, read-only scores, live replay-chain scores over WebSockets and long poll, Bun upgrade fallback, zero idle SQL activity on Bun and on all three workerd owner types, real idle timers and resume, server stats matching Bun/workerd across deaths and level restarts, byte/unit-size independence, trusted cache rebuilds, inherited fork scores, lost producer responses, the two-alarm chain, duplicate wakes, immutable replay bootstrap, restart recovery, sink initialization retries, public access policies, family ownership, and 5,000-tic deterministic capture/replay on v2 paths, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
 
 This is an unauthenticated demo with limited hosted load measurements and no unlimited archive guarantee. Important limits:
 
 - Session frames, batch manifests, snapshot/index writes and lobby rows are separate, nontransactional operations. An interruption can leave a partial session, missing metadata or an unindexed snapshot. There is no repair/retry flow; ambiguous network writes stop recording.
-- A v2 append has **two POSTs**: session and batch manifest. Session metadata writes only at create, fork and end; delete removes its State row. Snapshots require additional writes. Legacy API callers retain their existing lobby publication option.
+- A v2 append has **two POSTs**: session and batch manifest. Session metadata writes only at create, fork and end; delete removes its State row. Snapshots require additional writes.
 - A new lobby/watch tab replays both retained State streams from offset `-1`; no server snapshot/value route is provided. Lobby/scores keep sliding 12-hour TTL because no projection reads them. Active readers can retain growing history; TTL is not a bound on join cost for a continuously active lobby. Deleted sessions may retain server-only score rows until expiry, but the metadata join hides them. Projection age is measured from receipt in the current tab, not a server timestamp or a guarantee that a projection is healthy.
 - Browser unload can lose queued writes and leave a stale playing row. Use End before closing or reloading. Async unload handlers cannot guarantee a drain.
 - Frames and full heaps remain in browser memory. Baseline heaps add 16 MiB per engine, compression runs on the main thread, and snapshots must be trusted and match build/WAD/settings. Never restore untrusted heap data.
