@@ -12,18 +12,21 @@ Browser keyboard → DoomGeneric WASM (35 tics/s) → 9-byte input frames
             replay / snapshot restore                 ↓
 Browser client ───────────── same-origin HTTP ────────────────┐
   engine + WAD parts     Bun host               Cloudflare Worker
-  from static assets     SQLite                 ASSETS + DoomStreams
-                         /doom/*                one SQLite Durable Object
-                                   │
-                  Streamsy 0.12.0 protocol streams
-  /doom/sessions/<id>       JSON header line + binary input frames
-  /doom/batches/<id>        JSON batch manifest: tic ranges + real offsets
-  /doom/snapshots/<id>-N    closed gzip: metadata + XOR heap delta at tic N
-  /doom/snapshots/<id>-idx  binary (tic u32, compressed size u32) entries
-  /doom/lobby              JSON rows folded by id; latest row wins
+  from static assets     one SQLite             ASSETS + Durable Objects
+                         local counter          game:<family> → replay:<id>
+                                                        alarms ↓
+                                                          lobby:v2
+  /doom/v2/sessions/<family>_<session>  JSON header line + binary frames
+  /doom/v2/batches/<id>                tic ranges + opaque offsets
+  /doom/v2/snapshot-index/<id>         binary snapshot index
+  /doom/v2/snapshots/<id>/<tic>         closed gzip heap snapshots
+  /doom/v2/replay-wake/<id>            internal producer wake rows (public read)
+  /doom/v2/lobby                       browser-written State session rows
+  /doom/v2/scores                      server-written State tic counts (public read)
+  /doom/*                             legacy paths, still on object doom
 ```
 
-Each frame is the classic eight-byte Doom command layout plus the post-tic `prndindex` RNG byte. Replayers inject the command and check RNG on every tic. Tests also compare diagnostic state hashes. The session header records the WAD and WASM SHA-256, skill, episode and map.
+Each frame is the classic eight-byte Doom command layout plus the post-tic `prndindex` RNG byte. Replayers inject the command and check RNG on every tic. Tests also compare diagnostic state hashes. The session header records the WAD and WASM SHA-256, skill, episode and map. New IDs contain two exact 32-character lowercase hexadecimal components. Forks inherit the family component, keeping frames and snapshots together for native forks.
 
 Snapshots capture the entire 16 MiB heap XORed against the initialized engine baseline, then gzip it with identity metadata. They are lossless and specific to the engine build, WAD and settings. The browser checkpoints every 4200 tics (two minutes). A seek restores the latest checkpoint at or before its target and replays the remaining inputs on a fresh engine.
 
@@ -58,7 +61,7 @@ Choose a name and skill, then New game (E1M1). Click the canvas for keyboard foc
 
 Watch follows the stream live. Release the timeline slider to seek; the snapshot-to-target range appears below it. Follow live catches up again. Fork here opens a child at the displayed tic and starts recording new inputs. End game drains pending writes and returns to the lobby. Delete appears for sessions created by that browser, remembered in localStorage. It removes the child's snapshots/index/manifest and hides its row; the binary session is retained until TTL. This ownership UI provides no authorization.
 
-Frames flush in batches of about five tics through one serialized queue, which coalesces work behind slow writes. The screen shows pending frames and batch latency including metadata work. Lobby counts publish at most once per two seconds, and on End. A shared `#watch/<id>` URL always opens an observer, never another writer.
+Frames flush in batches of about five tics through one serialized queue, which coalesces work behind slow writes. The screen shows pending frames and batch latency including metadata work. Lobby counts publish at most once per two seconds, and on End. A shared `#watch/<id>` URL always opens an observer, never another writer. The existing lobby view combines legacy JSON rows and v2 State session rows. Server scores currently count decoded tics only; engine verification and the stats UI belong to later batches.
 
 ## Cloudflare
 
@@ -77,13 +80,20 @@ The Alchemy **v2** stack is `apps/host-cloudflare/alchemy.run.ts`, pinned to `2.
 | --- | --- |
 | Stack | `streamsy-doom` |
 | Worker logical id | `Host` |
-| Durable Object logical id / exported class / binding | `Streams` / `DoomStreams` / `STREAMS` |
+| Legacy object logical id / exported class / binding | `Streams` / `DoomStreams` / `STREAMS` |
+| Family storage | `Games` / `DoomGames` / `GAMES` |
+| Replay checkpoints and wake streams | `Replays` / `DoomReplay` / `REPLAYS` |
+| Lobby metadata and scores | `Lobby` / `DoomLobby` / `LOBBY` |
 | Physical Worker name | `streamsy-doom-<stage>` |
 | Allowed stages | `local`, `test`, `prod` |
 
 Keep these identifiers and local Alchemy state across deployments; changing resource identity can replace persistent resources. `Alchemy.Stage` selects the stage. `workersDev` is enabled for non-prod stages; production needs a separately configured domain/route before it is reachable.
 
-Every request runs through the Worker: `/doom/*` uses the Streamsy router and everything else calls the `ASSETS` binding. All stream paths use `Placement.byKey(() => "doom")`. Forks resolve source and target within a single object, so default per-stream placement breaks forks across session ids. This deliberately makes all games share one object. `maxMessageSize: 2_000_000` leaves room above Streamsy's 1 MiB default for snapshots while staying within the tested local SQLite envelope. Raising it arbitrarily can cause SQLite size errors to surface as 500 responses. Client assets and streams share an origin, so the Worker needs no CORS. The Bun host retains its existing cross-origin development CORS headers.
+Every request runs through the Worker. Legacy `/doom/*` paths retain `Placement.byKey(() => "doom")` and the original `DoomStreams` binding. V2 uses one shared `Placement.byRoute` table for public routing and internal object links: frames, manifests and snapshots go to `game:<family>`, wake streams to `replay:<id>`, and lobby/scores to `lobby:v2`. Alchemy derives additive SQLite class migrations from the three new bindings; retain its existing state when deploying.
+
+The client calls `POST /doom/v2/bootstrap/<id>` before creating frames, including forks. The Worker first initializes scores, then the replay owner durably saves its immutable ID and acquires a Streamsy host with a fixed local wake trigger. Frame commits schedule a family alarm to publish wakes; the receiving replay alarm reads remote bytes and publishes a deterministic tic count using producer delivery. Internal `/__frames`, `/__wake` and `/__scores` routes are reachable only through object stubs. Public requests under `/__…` return 404; scores and wakes are publicly read-only. Bun serves the same v2 API with a local attached counter over its single SQLite store.
+
+`maxMessageSize: 2_000_000` leaves room for snapshots while retaining the tested SQLite envelope. Both hosts share an origin with their client; Bun also retains its development CORS headers. Streams retain their existing TTLs; replay identity records remain small durable tombstones, including abandoned bootstraps. Automatic identity/checkpoint garbage collection is not implemented. Recovery after a commit-before-alarm crash is proven on reacquisition, not as an autonomous repair guarantee.
 
 For a future **approved** test deployment, first create the public source repository and configure its corresponding-source link, then build:
 
@@ -106,7 +116,7 @@ bun run typecheck
 bun run test
 ```
 
-The suite verifies 5,000-tic deterministic capture/replay, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
+The suite verifies the two-alarm chain, duplicate wakes, immutable replay bootstrap, restart recovery, sink initialization retries, public access policies, family ownership, and 5,000-tic deterministic capture/replay on legacy and v2 paths, fresh snapshot restore, drift detection, real-engine stream recording/live tail/seek, mid-batch and chained forks, deletes, host CORS/static-path safety, queue timing, and WAD split/reconstruction/hash rejection. Engine-dependent tests explicitly skip when build output or the WAD is absent; fetch and build first for full coverage.
 
 This is an unauthenticated demo, with no load test or unlimited archive guarantee. Important limits:
 
@@ -114,7 +124,7 @@ This is an unauthenticated demo, with no load test or unlimited archive guarante
 - A normal append has **three POSTs**: session, batch manifest and lobby. The browser throttles lobby updates, so most flushes use two and periodically add the third. Snapshots require additional writes.
 - Browser unload can lose queued writes and leave a stale playing row. Use End before closing or reloading. Async unload handlers cannot guarantee a drain.
 - Frames and full heaps remain in browser memory. Baseline heaps add 16 MiB per engine, compression runs on the main thread, and snapshots must be trusted and match build/WAD/settings. Never restore untrusted heap data.
-- One Durable Object owns all sessions, limiting concurrency and coupling their location/latency. There are no access controls, rate limits or per-player isolation. Browser ownership is only a convenience.
+- Each fork family shares one storage object; each session gets a replay object, and all scores share a lobby object. Popular families and the lobby can still bottleneck. There are no access controls or rate limits. Browser ownership is only a convenience.
 
 ## Licence and source
 

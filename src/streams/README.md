@@ -51,7 +51,48 @@ target, and replays the remainder. It validates engine identity first. A seek
 before the first checkpoint requires a fresh engine at tic 0. Snapshots are
 trusted, build-specific linear-memory state; use only matching WAD/build/settings.
 
+## V2 topology and compatibility
+
+`createSession` generates `<32 lowercase hex>_<32 lowercase hex>` IDs and calls
+`POST doom/v2/bootstrap/:id` before creating the frame stream. A fork copies its
+parent's family, including forks of forks. A supplied different-family child ID
+fails before any request. Use `{ legacy: true }` only to explicitly create a legacy
+recording; existing legacy IDs keep their original paths, including native forks.
+
+| V2 path | Content | Cloudflare owner |
+| --- | --- | --- |
+| `doom/v2/sessions/:id` | unchanged JSON header + 9-byte frames | `game:<family>` |
+| `doom/v2/batches/:id` | unchanged manifest | `game:<family>` |
+| `doom/v2/snapshot-index/:id` | unchanged binary index | `game:<family>` |
+| `doom/v2/snapshots/:id/:tic` | unchanged gzip snapshot | `game:<family>` |
+| `doom/v2/replay-wake/:id` | State wake rows, publicly read-only | `replay:<id>` |
+| `doom/v2/lobby` | State `session` collection, current SessionRow fields | `lobby:v2` |
+| `doom/v2/scores` | State `stats` collection, `{id, tic}`, publicly read-only | `lobby:v2` |
+
+Declarations in `v2.ts` use the published Streamsy 0.12.0 APIs. Cloudflare links
+and routing share `apps/host-cloudflare/topology.ts`. The replay host stores its
+identity before acquisition, attaches a concrete parameter-free local wake
+trigger, and reads the family's bytes remotely. Its deterministic counter saves
+an unfinished header or frame in its checkpoint; producer output retries retain
+the same sequence. It does not run Doom or verify gameplay yet. Bun attaches the
+same counter locally. Reserved `/__…` mounts are never public.
+
+`Lobby` folds both namespaces for compatibility, including a missing namespace.
+The browser follows both while keeping its existing table. For this batch it
+continues publishing client tic counts/status in session metadata. The server's
+placeholder count lives separately in scores. Delete still removes snapshots,
+index and manifest and writes a deleted session row; frame history stays until
+TTL. Identity tombstones/checkpoints have no application garbage collector yet.
+
+Workerd topology tests build only the Worker and use no cloud credentials. Test
+bundles, SQLite state and logs go under the batch scratch directory; override its
+location with `DOOM_TEST_SCRATCH`. The restart test explicitly reacquires the
+objects, which restores pending alarms; it does not prove autonomous crash repair.
+
 ## Stored paths and formats
+
+The legacy table below remains unchanged. V2 frames, manifests, lobby, wakes and
+scores use 43200 seconds; v2 snapshots and indexes use 86400 seconds.
 
 | Path | Content | TTL seconds |
 | --- | --- | ---: |
@@ -105,6 +146,6 @@ unindexed snapshot or a frame batch without manifest metadata, and creation/fork
 can leave partial resources. There is no crash-repair/retry or multi-writer
 coordination service in this batch. Do not fork sessions with incomplete metadata.
 Readers and manifests are held in memory; this is a small demo, not an unbounded
-archive. The lobby uses whole-row events and assumes one writer per session.
+archive. The legacy lobby uses whole-row events; v2 uses State upserts with one browser writer per session and a separate server-owned scores stream.
 Snapshot compression is synchronous; measured E1M1 sizes are below the cap but
 other maps, WADs or engine builds can exceed it and are rejected before upload.
