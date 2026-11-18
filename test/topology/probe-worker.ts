@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Test-only observability and fault injection. The public Worker is unchanged.
 import type { DurableObjectState } from "@cloudflare/workers-types";
-import { Effect } from "effect";
+import { Cause, Effect, Exit, Layer, Option } from "effect";
+import { CheckpointStore, Commit, Projection, Transaction } from "@streamsy/projection";
+import { makeReplayStats, replayStats } from "../../src/projection/stats";
+import { ReplayEngines } from "../../src/projection/engines";
+import { SnapshotTable } from "../../src/projection/snapshots";
+import { framesLink } from "../../apps/host-cloudflare/topology";
 import { Streamsy } from "@streamsy/core";
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
-import { Game, type StatsRow } from "../../src/streams/v2";
+import { Game, ReplayWake, type StatsRow } from "../../src/streams/v2";
 import worker, { DoomGames as Games, DoomReplay as Replay, DoomLobby as Lobby, type Env } from "../../apps/host-cloudflare/worker";
 export { DoomStreams } from "../../apps/host-cloudflare/worker";
 export default worker;
@@ -43,10 +48,12 @@ export class DoomGames extends Games {
   }
 }
 export class DoomReplay extends Replay {
+  private readonly probeEnv: Env;
   private steps = 0;
   private readonly queries: () => number;
   constructor(private readonly probeState: DurableObjectState, env: Env) {
     const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
+    this.probeEnv = env;
     const create = this.engines.create;
     this.engines.create = async identity => {
       const engine = await create(identity), snapshot = engine.snapshot, step = engine.step.bind(engine);
@@ -66,6 +73,37 @@ export class DoomReplay extends Replay {
     await super.alarm();
   }
   override async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/__test/transaction-unit") {
+      const id = (await this.probeState.storage.get<string>("doom-v2-session-id"))!;
+      const projection = makeReplayStats({ snapshotInterval: Number(this.probeEnv.DOOM_SNAPSHOT_INTERVAL ?? 21000) });
+      const local = Layer.merge(CheckpointStore.layer, Transaction.layer).pipe(Layer.provideMerge(DurableObjectStorage.layer(Streamsy.group(Game, ReplayWake), { client: { storage: this.probeState.storage } })));
+      const result = await Effect.runPromise(Effect.exit(Projection.run({ ...projection.at({ id }), commit: Commit.transaction }).pipe(
+        Effect.provide(local), Effect.provide(framesLink.client(this.probeEnv.GAMES).layer),
+        Effect.provideService(ReplayEngines, this.engines), Effect.provideService(SnapshotTable, this.snapshots),
+      )));
+      return Response.json({ failure: Exit.isFailure(result) ? Cause.pretty(result.cause) : null });
+    }
+    if (url.pathname === "/__test/checkpoint") {
+      const id = await this.probeState.storage.get<string>("doom-v2-session-id");
+      const record = await Effect.runPromise(Effect.gen(function* () {
+        const store = yield* CheckpointStore;
+        return Option.getOrNull((yield* store.load({ id: replayStats.id, version: replayStats.version, generation: replayStats.generation, params: { id: id! } })).record);
+      }).pipe(Effect.provide(CheckpointStore.layer.pipe(Layer.provideMerge(DurableObjectStorage.layer(Streamsy.group(Game), { client: { storage: this.probeState.storage } }))))));
+      return Response.json(record);
+    }
+    if (url.pathname === "/__test/fail-checkpoint") {
+      // Fail after the handler wrote a snapshot and appended Game stats.
+      for (const operation of ["INSERT", "UPDATE"]) this.probeState.storage.sql.exec(`CREATE TRIGGER test_fail_checkpoint_${operation} BEFORE ${operation} ON streamsy_owner_records
+        WHEN NEW.owner_key LIKE '%doom-v2-replay%' AND NEW.owner_key NOT LIKE '%doom-v2-replay-idle%' AND CASE WHEN json_valid(NEW.owner_value) THEN json_extract(NEW.owner_value, '$.record.pending') ELSE 1 END IS NULL AND EXISTS (SELECT 1 FROM server_snapshots WHERE tic = 100)
+        BEGIN SELECT RAISE(ABORT, 'Injected checkpoint failure after snapshot and stats'); END`);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/__test/allow-checkpoint") {
+      for (const operation of ["INSERT", "UPDATE"]) this.probeState.storage.sql.exec(`DROP TRIGGER test_fail_checkpoint_${operation}`);
+      await this.probeState.storage.setAlarm(Date.now());
+      return new Response(null, { status: 204 });
+    }
     if (new URL(request.url).pathname === "/__test/game-events") {
       const { id, rows } = await request.json() as { id: string; rows: StatsRow[] };
       // Test-only writer using the published storage API, on this replay's SQL.
@@ -85,7 +123,7 @@ export class DoomReplay extends Replay {
       this.probeState.storage.sql.exec("UPDATE streamsy_streams SET expires_at_ms = 0, expires_at = '1970-01-01T00:00:00.000Z' WHERE stream_id LIKE 'doom/v2/games/%'");
       await this.probeState.storage.setAlarm(Date.now()); return new Response(null, { status: 204 });
     }
-    if (new URL(request.url).pathname === "/__test/legacy-snapshots") {
+    if (url.pathname === "/__test/legacy-snapshots") {
       this.probeState.storage.sql.exec("UPDATE server_snapshots SET resume_offset = NULL, resume_frames = NULL"); return new Response(null, { status: 204 });
     }
     if (new URL(request.url).pathname === "/__test/expire-snapshots") {

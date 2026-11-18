@@ -198,3 +198,5 @@ The `doom-v2-leaderboard` projection uses Entries as its sole input and
 `Commit.transaction`; it ranks by `createdAt` descending then `id`, retains 50,
 and removes deleted entries without a refill scan. The lobby streams do not expire;
 per-game expiry removes derived entries through `lobbyEntry`.
+
+The [engine transaction spike](../../docs/engine-transaction-spike.md) confirms async execution and atomic rollback on workerd, but production retains `Commit.producer` because a transaction Commit cannot resume a persisted producer pin in Streamsy 0.12.0. No checkpoint reset or projection identity change is applied.

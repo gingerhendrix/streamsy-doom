@@ -655,3 +655,62 @@ test("workerd: snapshot recovery preserves partial frames and restores legacy ro
     expect(final.engines[0]).toEqual(log.final);
   } finally { await h.stop(); }
 }, 30000);
+
+test("workerd: engine transaction spike rolls snapshot, stats and checkpoint back together across awaits", async () => {
+  const h = await harness(100), log = await recording(175);
+  try {
+    const writer = await createSession(h.client, { playerName: "Transaction spike", identity: log.identity });
+    const id = writer.row.id, replay = await h.stub("REPLAYS", `replay:${id}`), family = await h.stub("GAMES", `game:${familyOf(id)}`);
+    const checkpoint = async () => await (await replay.fetch("https://internal/__test/checkpoint")).json() as { state: string };
+    const snapshots = async () => await (await replay.fetch("https://internal/__test/snapshots")).json() as unknown[];
+    const transactionUnit = async () => await (await replay.fetch("https://internal/__test/transaction-unit", { method: "POST" })).json() as { failure: string | null };
+    const stage = async (items: Uint8Array[]) => {
+      expect((await family.fetch(`https://internal/__test/quiet?path=${encodeURIComponent('/' + sessionPath(id))}`, { method: "POST", body: concat(items) })).status).toBe(204);
+    };
+    await h.score(id, 0, false); await Bun.sleep(100);
+    await stage(log.frames.slice(0, 50));
+    expect((await transactionUnit()).failure).toBeNull();
+    const before = await checkpoint(), beforeStats = (await h.scores()).filter(row => row.key === id);
+    await replay.fetch("https://internal/__test/fail-checkpoint", { method: "POST" });
+    await stage(log.frames.slice(50));
+    expect((await transactionUnit()).failure).toContain("Cannot write a checkpoint");
+    expect(await snapshots()).toEqual([]);
+    expect(await checkpoint()).toEqual(before);
+    expect((await h.scores()).filter(row => row.key === id)).toEqual(beforeStats);
+    await replay.fetch("https://internal/__test/evict", { method: "POST" });
+    await replay.fetch("https://internal/__test/allow-checkpoint", { method: "POST" });
+    expect((await transactionUnit()).failure).toBeNull();
+    const final = await h.score(id, 175);
+    expect(final.verified).toBe(true);
+    expect(JSON.parse((await checkpoint()).state).tic).toBe(175);
+    expect(await snapshots()).toHaveLength(1);
+    const expected = await replayPages(initialStats(), [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames])], await createHeadless(log.identity), id);
+    expect((await h.scores()).filter(row => row.key === id).map(({ value: { live, ...stats } }) => stats)).toEqual(expected.rows);
+    console.log("MEASURED workerd transaction spike: asynchronous engine creation, remote recovery reads and gzip succeed; injected checkpoint failure rolls back snapshot + stats + checkpoint; retry commits one snapshot and the exact replay row sequence");
+  } finally { await h.stop(); }
+}, 30000);
+
+test("workerd: transaction spike cannot resume a persisted producer pin on upgrade", async () => {
+  const h = await harness(100), log = await recording(175);
+  try {
+    const writer = await createSession(h.client, { playerName: "Pending producer upgrade", identity: log.identity });
+    const id = writer.row.id, replay = await h.stub("REPLAYS", `replay:${id}`);
+    const checkpoint = async () => await (await replay.fetch("https://internal/__test/checkpoint")).json() as { state: string; pending?: unknown };
+    await writer.append(log.frames.slice(0, 50)); await h.score(id, 50, false);
+    await replay.fetch("https://internal/__test/fail-checkpoint", { method: "POST" });
+    await writer.append(log.frames.slice(50));
+    await until(async () => {
+      const record = await checkpoint();
+      const snapshots = await (await replay.fetch("https://internal/__test/snapshots")).json() as unknown[];
+      return record.pending && snapshots.length === 1 ? true : undefined;
+    }, "producer pin before failed checkpoint");
+    await Bun.sleep(50);
+    const before = await checkpoint();
+    expect(JSON.parse(before.state).tic).toBe(50);
+    expect(before.pending).toBeDefined();
+    const result = await (await replay.fetch("https://internal/__test/transaction-unit", { method: "POST" })).json() as { failure: string };
+    expect(result.failure).toContain("Commit transaction cannot resume a pinned unit");
+    expect(await checkpoint()).toEqual(before);
+    console.log("MEASURED workerd transaction upgrade gap: Streamsy 0.12.0 rejects an existing pending producer checkpoint with 'Commit transaction cannot resume a pinned unit'; production keeps Commit.producer");
+  } finally { await h.stop(); }
+}, 30000);
