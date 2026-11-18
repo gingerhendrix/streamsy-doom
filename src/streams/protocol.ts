@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { isFamilyId } from "./ids";
 export const absoluteExpiry = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-export const projectionReadPath = (path: string) => /^doom\/v2\/(sessions|batches|replay-wake|events)\//.test(path);
+export const projectionReadPath = (path: string) =>
+  /^doom\/v2\/(sessions|batches|replay-wake|events)\//.test(path);
 export const binary = "application/octet-stream";
 export const sessionPath = (id: string) => `doom/v2/sessions/${validId(id)}`;
 export const batchPath = (id: string) => `doom/v2/batches/${validId(id)}`;
 export const indexPath = (id: string) => `doom/v2/server-snapshots/${validId(id)}`;
-export const snapshotPath = (id: string, tic: number) => `doom/v2/server-snapshots/${validId(id)}/${uint32(tic)}`;
+export const snapshotPath = (id: string, tic: number) =>
+  `doom/v2/server-snapshots/${validId(id)}/${uint32(tic)}`;
 export function validId(id: string) {
   if (!isFamilyId(id)) throw new Error("Invalid v2 session id");
   return id;
@@ -22,26 +24,67 @@ export const offsetOf = (response: Response) => {
   return value;
 };
 export class ProtocolError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
 }
 export class ProtocolClient {
-  constructor(readonly baseUrl: string, readonly fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = (input, init) => fetch(input, init)) {}
+  constructor(
+    readonly baseUrl: string,
+    readonly fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = (
+      input,
+      init,
+    ) => fetch(input, init),
+  ) {}
   async request(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
     // Revalidate all growing streams, including first reads and repeated long polls.
     headers.set("Cache-Control", "no-cache");
-    const response = await this.fetcher(new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"), {
-      ...init, headers, cache: "no-store",
-    });
-    if (!response.ok) throw new ProtocolError(`${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`, response.status);
+    const response = await this.fetcher(
+      new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"),
+      {
+        ...init,
+        headers,
+        cache: "no-store",
+      },
+    );
+    if (!response.ok)
+      throw new ProtocolError(
+        `${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`,
+        response.status,
+      );
     return response;
   }
-  async create(path: string, body: Uint8Array | string, type = binary, ttl = 43200, extra: Record<string, string> = {}) {
-    const expiry: Record<string, string> = projectionReadPath(path) ? { "Stream-Expires-At": absoluteExpiry() } : { "Stream-TTL": String(ttl) };
-    return this.request(path, { method: "PUT", headers: { "Content-Type": type, ...expiry, ...extra }, body: body as BodyInit });
+  async create(
+    path: string,
+    body: Uint8Array | string,
+    type = binary,
+    ttl = 43200,
+    extra: Record<string, string> = {},
+  ) {
+    const expiry: Record<string, string> = projectionReadPath(path)
+      ? { "Stream-Expires-At": absoluteExpiry() }
+      : { "Stream-TTL": String(ttl) };
+    return this.request(path, {
+      method: "PUT",
+      headers: { "Content-Type": type, ...expiry, ...extra },
+      body: body as BodyInit,
+    });
   }
-  async append(path: string, body: Uint8Array | string, type = binary, extra: Record<string, string> = {}) {
-    return this.request(path, { method: "POST", headers: { "Content-Type": type, ...extra }, body: body as BodyInit });
+  async append(
+    path: string,
+    body: Uint8Array | string,
+    type = binary,
+    extra: Record<string, string> = {},
+  ) {
+    return this.request(path, {
+      method: "POST",
+      headers: { "Content-Type": type, ...extra },
+      body: body as BodyInit,
+    });
   }
   async read(path: string, offset = "-1", live = false, signal?: AbortSignal, cursor?: string) {
     const query = new URLSearchParams({ offset });
@@ -49,7 +92,8 @@ export class ProtocolClient {
     if (cursor) query.set("cursor", cursor);
     const response = await this.request(`${path}?${query}`, { signal });
     return {
-      bytes: new Uint8Array(await response.arrayBuffer()), offset: offsetOf(response),
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      offset: offsetOf(response),
       upToDate: response.headers.get("Stream-Up-To-Date") === "true",
       closed: response.headers.get("Stream-Closed") === "true",
       cursor: response.headers.get("Stream-Cursor") ?? undefined,
@@ -75,20 +119,27 @@ export class ProtocolClient {
       // Each HTTP response is its own JSON array, including paginated reads.
       const parsed = JSON.parse(new TextDecoder().decode(batch.bytes) || "[]");
       if (!Array.isArray(parsed)) throw new Error("Expected JSON stream array");
-      result.push(...parsed as T[]);
+      result.push(...(parsed as T[]));
       if (batch.upToDate) return result;
       if (batch.offset === offset) throw new Error("Read made no progress");
       offset = batch.offset;
     } while (true);
   }
   async remove(path: string) {
-    const response = await this.fetcher(new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"), { method: "DELETE" });
-    if (!response.ok && response.status !== 404) throw new Error(`DELETE ${path}: ${response.status}`);
+    const response = await this.fetcher(
+      new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"),
+      { method: "DELETE" },
+    );
+    if (!response.ok && response.status !== 404)
+      throw new Error(`DELETE ${path}: ${response.status}`);
   }
 }
 export function concat(parts: Uint8Array[]) {
   const result = new Uint8Array(parts.reduce((size, p) => size + p.length, 0));
   let at = 0;
-  for (const p of parts) { result.set(p, at); at += p.length; }
+  for (const p of parts) {
+    result.set(p, at);
+    at += p.length;
+  }
   return result;
 }

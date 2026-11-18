@@ -5,7 +5,7 @@ export async function snapshotEntries(client: ProtocolClient, id: string, tics: 
   const store = new SnapshotStore(client, id);
   for (let n = 0; n < 500; n++) {
     const entries = await store.entries();
-    if (JSON.stringify(entries.map(row => row.tic)) === JSON.stringify(tics)) return entries;
+    if (JSON.stringify(entries.map((row) => row.tic)) === JSON.stringify(tics)) return entries;
     await Bun.sleep(20);
   }
   throw new Error(`Snapshots did not catch up to ${tics.join(",")}`);

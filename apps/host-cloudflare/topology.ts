@@ -13,6 +13,21 @@ export const placement = Placement.byRoute([
   rule({ stream: Leaderboard, owner: () => "lobby:v2" }),
   rule({ stream: Entries, owner: () => "lobby:v2" }),
 ]);
-export const framesLink = ObjectLink.make({ group: Streamsy.group(Sessions), prefix: "/__frames", placement, access: "read" });
-export const wakeLink = ObjectLink.make({ group: Streamsy.group(ReplayWake), prefix: "/__wake", placement, access: "append" });
-export const entriesLink = ObjectLink.make({ group: Streamsy.group(Entries), prefix: "/__entries", placement, access: "append" });
+export const framesLink = ObjectLink.make({
+  group: Streamsy.group(Sessions),
+  prefix: "/__frames",
+  placement,
+  access: "read",
+});
+export const wakeLink = ObjectLink.make({
+  group: Streamsy.group(ReplayWake),
+  prefix: "/__wake",
+  placement,
+  access: "append",
+});
+export const entriesLink = ObjectLink.make({
+  group: Streamsy.group(Entries),
+  prefix: "/__entries",
+  placement,
+  access: "append",
+});

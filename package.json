@@ -1,13 +1,15 @@
 {
   "name": "streamsy-doom",
   "private": true,
-  "type": "module",
   "license": "GPL-2.0-or-later",
+  "type": "module",
   "scripts": {
     "fetch-wad": "bun engine/scripts/fetch-wad.ts",
     "build:engine": "bun engine/scripts/build.ts",
     "test": "bun test engine/test test",
     "typecheck": "tsc --noEmit",
+    "format": "oxfmt . --write",
+    "format:check": "oxfmt . --check",
     "dev:host": "bun apps/host-bun/host.ts",
     "build:web": "bun scripts/build-web.ts",
     "dev": "bun scripts/dev.ts",
@@ -17,16 +19,6 @@
     "deploy:cf": "cd apps/host-cloudflare && alchemy deploy --stage test --profile default",
     "destroy:cf": "cd apps/host-cloudflare && alchemy destroy --stage test --profile default",
     "loadtest": "bun scripts/loadtest/main.ts"
-  },
-  "devDependencies": {
-    "@alchemy.run/cloudflare": "2.0.0-beta.85",
-    "@cloudflare/workers-types": "5.20261117.1",
-    "@effect/platform-node": "4.1.2",
-    "@types/bun": "1.4.4",
-    "alchemy": "2.0.0-beta.85",
-    "miniflare": "4.20260730.0",
-    "typescript": "7.0.2",
-    "vite": "8.3.8"
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.2",
@@ -38,6 +30,17 @@
     "@streamsy/storage": "0.12.0",
     "effect": "4.1.2",
     "fflate": "0.8.2"
+  },
+  "devDependencies": {
+    "@alchemy.run/cloudflare": "2.0.0-beta.85",
+    "@cloudflare/workers-types": "5.20261117.1",
+    "@effect/platform-node": "4.1.2",
+    "@types/bun": "1.4.4",
+    "alchemy": "2.0.0-beta.85",
+    "miniflare": "4.20260730.0",
+    "oxfmt": "0.73.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
   },
   "overrides": {
     "@effect/sql-d1": "4.1.2",

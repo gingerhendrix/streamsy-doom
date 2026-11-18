@@ -8,14 +8,8 @@
     "allowJs": true,
     "checkJs": false,
     "skipLibCheck": true,
-    "types": [
-      "bun"
-    ],
-    "lib": [
-      "ES2023",
-      "DOM",
-      "DOM.Iterable"
-    ]
+    "types": ["bun"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
   "include": [
     "src/**/*.ts",

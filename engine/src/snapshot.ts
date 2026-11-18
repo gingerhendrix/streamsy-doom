@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import type { EngineIdentity } from "./engine.js";
 /** Stream a post-init XOR into native gzip without a second whole-heap copy. */
-export async function compressSnapshot(identity: EngineIdentity, tic: number, heap: Uint8Array, baseline: Uint8Array) {
-  const gzip = new CompressionStream("gzip"), writer = gzip.writable.getWriter();
+export async function compressSnapshot(
+  identity: EngineIdentity,
+  tic: number,
+  heap: Uint8Array,
+  baseline: Uint8Array,
+) {
+  const gzip = new CompressionStream("gzip"),
+    writer = gzip.writable.getWriter();
   const result = new Response(gzip.readable).arrayBuffer();
   // Observe a compression failure even while a writer operation is pending.
   result.catch(() => {});
@@ -19,6 +25,8 @@ export async function compressSnapshot(identity: EngineIdentity, tic: number, he
     await writer.close();
     return new Uint8Array(await result);
   } catch (error) {
-    await writer.abort(error).catch(() => {}); await result.catch(() => {}); throw error;
+    await writer.abort(error).catch(() => {});
+    await result.catch(() => {});
+    throw error;
   }
 }

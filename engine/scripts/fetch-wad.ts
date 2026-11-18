@@ -26,7 +26,9 @@ if (process.env.DOOM_WAD) {
     if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
     const zip = new Uint8Array(await response.arrayBuffer());
     verify(zip, zipHash);
-    const files = unzipSync(zip, { filter: f => /\/(freedoom1\.wad|COPYING\.txt|CREDITS\.txt)$/.test(f.name) });
+    const files = unzipSync(zip, {
+      filter: (f) => /\/(freedoom1\.wad|COPYING\.txt|CREDITS\.txt)$/.test(f.name),
+    });
     const wad = files[`freedoom-${version}/freedoom1.wad`];
     verify(wad, wadHash);
     for (const name of ["freedoom1.wad", "COPYING.txt", "CREDITS.txt"])

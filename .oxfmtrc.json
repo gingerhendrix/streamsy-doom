@@ -1,0 +1,12 @@
+{
+  "ignorePatterns": [
+    "engine/doomgeneric/**",
+    "engine/build/**",
+    "engine/data/**",
+    "dist/**",
+    "apps/*/dist/**",
+    "apps/web/public/**",
+    "**/*.md",
+    "LICENSE"
+  ]
+}
