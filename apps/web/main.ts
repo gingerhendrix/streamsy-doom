@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionWriter, SNAPSHOT_INTERVAL, StateRows, followJson, type StateEvent } from "../../src/streams";
+import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionWriter, SNAPSHOT_INTERVAL, StateRows, followState, type StateEvent } from "../../src/streams";
 import type { SessionMetadata, EntryRow } from "../../src/streams/v2";
 import type { Engine } from "../../engine/src/engine.js";
 import { GameHud, TicClock } from "./hud";
@@ -56,7 +56,7 @@ function stage(title: string, row: SessionMetadata, controls: string) {
 async function showLobby() {
   await dispose(); dispose = async () => {};
   history.replaceState(null, "", location.pathname);
-  main.innerHTML = `<section class="new-game"><h2>Start a new timeline</h2><p>Play, watch live, or rewind and take the game in another direction.</p><form><label>Player name<input id="name" maxlength="40" value="Player" required></label><fieldset class="skill-menu" id="skill"><legend>Choose your skill</legend><label><input type="radio" name="skill" value="1"><span>I'm too young to die</span></label><label><input type="radio" name="skill" value="2"><span>Hey, not too rough</span></label><label><input type="radio" name="skill" value="3" checked><span>Hurt me plenty</span></label><label><input type="radio" name="skill" value="4"><span>Ultra-Violence</span></label><label><input type="radio" name="skill" value="5"><span>Nightmare!</span></label></fieldset><button class="primary">New game</button></form></section><section class="tally"><h2>Sessions <span id="count"></span></h2><p id="transport">Connecting…</p><div id="sessions">Loading lobby…</div><p class="hint">Lobby summaries publish at most every five seconds of play, with immediate presence and session changes. ¹Age is time since this tab received the score at its projected tic; initial history has no server timestamp. New tabs replay retained lobby history.</p></section>`;
+  main.innerHTML = `<section class="new-game"><h2>Start a new timeline</h2><p>Play, watch live, or rewind and take the game in another direction.</p><form><label>Player name<input id="name" maxlength="40" value="Player" required></label><fieldset class="skill-menu" id="skill"><legend>Choose your skill</legend><label><input type="radio" name="skill" value="1"><span>I'm too young to die</span></label><label><input type="radio" name="skill" value="2"><span>Hey, not too rough</span></label><label><input type="radio" name="skill" value="3" checked><span>Hurt me plenty</span></label><label><input type="radio" name="skill" value="4"><span>Ultra-Violence</span></label><label><input type="radio" name="skill" value="5"><span>Nightmare!</span></label></fieldset><button class="primary">New game</button></form></section><section class="tally"><h2>Sessions <span id="count"></span></h2><p id="transport">Connecting…</p><div id="sessions">Loading lobby…</div><p class="hint">Lobby summaries publish at most every five seconds of play, with immediate presence and session changes. ¹Age is time since this tab received the score at its projected tic; initial history has no server timestamp. The newest 50 sessions load from a snapshot.</p></section>`;
   document.querySelector("form")!.addEventListener("submit", event => {
     event.preventDefault();
     void action(async () => {
@@ -72,14 +72,14 @@ async function showLobby() {
   });
   const abort = new AbortController();
   dispose = async () => { abort.abort(); };
-  const entries = new StateRows<EntryRow>("entry");
+  const entries = new StateRows<EntryRow>("game");
   const received = new Map<string, number>();
-  void followJson<StateEvent<EntryRow>>(client, "doom/v2/entries", {
+  void followState<StateEvent<EntryRow>>(client, { snapshot: "doom/v2/state-snapshot/leaderboard", stream: "doom/v2/leaderboard",
     signal: abort.signal, onBatch: events => {
       entries.apply(events);
       for (const event of events) if (event.key) received.set(event.key, Date.now());
       if (!abort.signal.aborted) renderRows([...entries.rows.values()], received);
-    }, onTransport: mode => { if (!abort.signal.aborted) document.querySelector("#transport")!.textContent = `Entries: ${mode}`; },
+    }, onTransport: mode => { if (!abort.signal.aborted) document.querySelector("#transport")!.textContent = `Leaderboard: ${mode}`; },
   }).catch(error => { if (!abort.signal.aborted) report(error); });
   const ageTimer = setInterval(() => {
     for (const node of document.querySelectorAll<HTMLElement>("[data-score-received]")) {
@@ -93,7 +93,7 @@ function scoreCells(score?: EntryRow["score"]) {
 }
 function verification(score?: EntryRow["score"]) { return !score ? "Pending" : score.verified ? "Verified" : "Drift · unverified"; }
 function renderRows(rows: EntryRow[], received = new Map<string, number>()) {
-  rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
   const container = document.querySelector("#sessions")!; container.replaceChildren();
   document.querySelector("#count")!.textContent = `(${rows.length})`;
   if (!rows.length) { container.append(el("p", "No sessions yet. Start the first game.")); return; }

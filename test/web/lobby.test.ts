@@ -78,7 +78,7 @@ test("Bun browser fallback receives server scores; v2 lifecycle writes metadata 
     sessions.apply(deleted);
     expect(sessions.rows.has(child.row.id)).toBe(false);
     await expect(new Lobby(client).get(child.row.id)).rejects.toThrow("Session missing");
-    await expect(client.append("doom/v2/entries", JSON.stringify([{ type: "stats", key: writer.row.id, value: { kills: 999 }, headers: { operation: "upsert" } }]), "application/json")).rejects.toMatchObject({ status: 405 });
+    await expect(client.append("doom/v2/leaderboard", JSON.stringify([{ type: "stats", key: writer.row.id, value: { kills: 999 }, headers: { operation: "upsert" } }]), "application/json")).rejects.toMatchObject({ status: 405 });
   } finally { abort.abort(); await follow; await host.stop(); }
 }, 15000);
 
@@ -108,4 +108,25 @@ test("broken socket resumes at its last control offset and never applies an unco
   });
   expect(offsets).toEqual(["-1", "opaque/+one=="]);
   expect(delivered).toEqual([[1], [2]]);
+});
+
+test("followState applies a snapshot then uses its opaque offset, including abort before the follow", async () => {
+  const { followState } = await import("../../src/streams");
+  for (const abortAtSnapshot of [false, true]) {
+    const abort = new AbortController(), paths: URL[] = [], state = new StateRows<{ id: string; n: number }>("game");
+    const row = (n: number) => ({ type: "game", key: "one", value: { id: "one", n }, headers: { operation: "upsert" } });
+    const client = new ProtocolClient("https://demo/", async input => {
+      const url = new URL(String(input)); paths.push(url);
+      if (paths.length === 1) return Response.json([{ headers: { control: "snapshot-start" } }, row(1), { headers: { control: "snapshot-end" } }], {
+        headers: { "Stream-Next-Offset": "opaque/+snapshot==" },
+      });
+      expect(url.searchParams.get("offset")).toBe("opaque/+snapshot==");
+      return Response.json([row(1), row(2)], { headers: { "Stream-Next-Offset": "opaque:next", "Stream-Up-To-Date": "true" } });
+    });
+    let batches = 0;
+    await followState<StateEvent<{ id: string; n: number }>>(client, { snapshot: "state-snapshot", stream: "state", signal: abort.signal, websocket: false,
+      onBatch: events => { batches++; state.apply(events); if (abortAtSnapshot || batches === 2) abort.abort(); } });
+    expect(paths).toHaveLength(abortAtSnapshot ? 1 : 2);
+    expect(state.rows.get("one")?.n).toBe(abortAtSnapshot ? 1 : 2);
+  }
 });

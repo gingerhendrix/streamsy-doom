@@ -46,6 +46,9 @@ export type EntryRow = typeof EntryRowSchema.Type;
 export class Entries extends Streamsy.state<Entries>()("DoomV2/Entries", "doom/v2/entries", {
   params: {}, collections: { entry: { schema: EntryRowSchema, key: "id" } },
 }) {}
+export class Leaderboard extends Streamsy.state<Leaderboard>()("DoomV2/Leaderboard", "doom/v2/leaderboard", {
+  params: {}, collections: { game: { schema: EntryRowSchema, key: "id" } },
+}) {}
 export const familyStreams = Streamsy.group(Sessions, Batches);
-export const lobbyStreams = Streamsy.group(Entries);
-export const allStreams = Streamsy.group(Sessions, Batches, ReplayWake, Game, Entries);
+export const lobbyStreams = Streamsy.group(Entries, Leaderboard);
+export const allStreams = Streamsy.group(Sessions, Batches, ReplayWake, Game, Entries, Leaderboard);

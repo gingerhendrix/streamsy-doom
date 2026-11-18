@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { absoluteExpiry } from "../../src/streams/protocol";
-import { Http } from "@streamsy/core";
-import { CheckpointStore, Projection } from "@streamsy/projection";
-import { allStreams, ReplayWake, Game, Entries } from "../../src/streams/v2";
+import { Http, Streamsy } from "@streamsy/core";
+import { CheckpointStore, Projection, Transaction } from "@streamsy/projection";
+import { allStreams, Sessions, Batches, ReplayWake, Game, Leaderboard } from "../../src/streams/v2";
 import { bootstrapSession, changeSession, sessionInput } from "../../src/server/session";
+import { initLobbyStreams } from "../../src/server/lobby";
+import { gameSnapshot, stateSnapshot, stateSnapshotRoute, stateSnapshotResponse, LeaderboardTable, stateTableMigration } from "../../src/server/state-snapshot";
+import { leaderboard } from "../../src/projection/leaderboard";
 import { lobbyEntry } from "../../src/projection/lobby-entry";
 import { isFamilyId } from "../../src/streams/ids";
 import { makeReplayStats, replayIdle } from "../../src/projection/stats";
@@ -38,15 +41,18 @@ export async function startHost(options: {
   const protocol = BunStorage.layerProtocol({
     client: { filename: options.database ?? "doom.sqlite" }, longPollTimeoutMs: options.longPollTimeoutMs ?? 20_000,
   });
-  const storage = CheckpointStore.layer.pipe(Layer.provideMerge(Protocol.bind(protocol, allStreams).pipe(Layer.provideMerge(protocol))));
+  const storage = stateTableMigration.pipe(
+    Layer.provideMerge(Layer.merge(CheckpointStore.layer, Transaction.layer)),
+    Layer.provideMerge(Protocol.bind(protocol, allStreams).pipe(Layer.provideMerge(protocol))),
+  );
   let engineFactory: ReturnType<typeof serverEngine> | undefined;
   const engines = Layer.succeed(ReplayEngines, { cache: new Map(), live: new Set<string>(), create: async identity => (await (engineFactory ??= serverEngine(options.wadPath)))(identity) });
-  const runtime = ManagedRuntime.make(Layer.mergeAll(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true }), Projection.attach(lobbyEntry, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines), Layer.provideMerge(Layer.succeed(SnapshotTable, snapshots))));
+  const runtime = ManagedRuntime.make(Layer.mergeAll(Projection.attach(leaderboard, { durable: true }), Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true }), Projection.attach(lobbyEntry, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines), Layer.provideMerge(Layer.succeed(SnapshotTable, snapshots))));
   const context = await runtime.context();
   const cors = HttpRouter.cors({ exposedHeaders, maxAge: 0 });
-  const v2 = HttpRouter.toWebHandler(Http.routes(allStreams, {
+  const v2 = HttpRouter.toWebHandler(Http.routes(Streamsy.group(Sessions, Batches, ReplayWake, Game, Leaderboard), {
     prefix: "/", maxMessageSize: 2_000_000,
-    access: stream => stream === Entries || stream === Game || stream === ReplayWake ? "read" : "full",
+    access: stream => stream === Leaderboard || stream === Game || stream === ReplayWake ? "read" : "full",
   }).pipe(Layer.provide(cors), Layer.provideMerge(Layer.succeedContext(context))), { disableLogger: true });
   const directory = await realpath(options.staticDirectory ?? fileURLToPath(new URL("./public", import.meta.url)));
   let sessionQueue: Promise<unknown> = Promise.resolve();
@@ -56,8 +62,19 @@ export async function startHost(options: {
       const url = new URL(request.url);
       let response: Response;
       const snapshot = snapshotRoute(request);
+      const stateRoute = stateSnapshotRoute(request);
       if (snapshot instanceof Response) response = snapshot;
       else if (snapshot) response = snapshotResponse(request, snapshot, snapshots);
+      else if (stateRoute instanceof Response) response = stateRoute;
+      else if (stateRoute) {
+        response = await runtime.runPromise(Effect.gen(function* () {
+          if (stateRoute.kind === "leaderboard") {
+            yield* initLobbyStreams;
+            return stateSnapshotResponse(yield* stateSnapshot(LeaderboardTable.at({}), ["game"]));
+          }
+          return stateSnapshotResponse(yield* gameSnapshot(stateRoute.id));
+        }).pipe(Effect.catchTag("StreamNotFound", () => Effect.succeed(new Response(null, { status: 404, headers: { "Cache-Control": "no-store" } })))));
+      }
       else if (url.pathname.startsWith("/__")) response = new Response(null, { status: 404 });
       else if (url.pathname.startsWith("/doom/v2/bootstrap/")) {
         if (request.method !== "POST") response = new Response(null, { status: 405 });
@@ -69,7 +86,7 @@ export async function startHost(options: {
             try { input = sessionInput(id, await request.json()); }
             catch (error) { return new Response(String(error), { status: 400 }); }
             const work = sessionQueue.then(() => runtime.runPromise(Effect.gen(function* () {
-              yield* (yield* Entries).create({}, { ttlSeconds: 43200 });
+              yield* initLobbyStreams;
               const wake = yield* ReplayWake, game = yield* Game;
               yield* wake.head({ id }).pipe(Effect.catchTag("StreamNotFound", () => wake.create({ id }, { expiresAt: absoluteExpiry() })));
               const expiresAt = (yield* wake.head({ id })).expiresAt!;

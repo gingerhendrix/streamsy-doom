@@ -4,12 +4,15 @@ import type { DurableObjectNamespace, DurableObjectState, ExecutionContext, Inco
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { Http, Streamsy } from "@streamsy/core";
-import { CheckpointStore, ProjectionWakeup } from "@streamsy/projection";
+import { CheckpointStore, ProjectionWakeup, Transaction } from "@streamsy/projection";
 import { StreamsyObject, router, type ObjectInstance } from "@streamsy/serve/cloudflare";
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
 import { familyOf } from "../../src/streams/ids";
-import { familyStreams, lobbyStreams, ReplayWake, Game, Entries, Sessions } from "../../src/streams/v2";
+import { familyStreams, lobbyStreams, ReplayWake, Game, Entries, Leaderboard, Sessions } from "../../src/streams/v2";
 import { bootstrapSession, changeSession, sessionInput } from "../../src/server/session";
+import { gameSnapshot, stateSnapshot, stateSnapshotRoute, LeaderboardTable, stateTableMigration } from "../../src/server/state-snapshot";
+import { initLobbyStreams } from "../../src/server/lobby";
+import { leaderboard } from "../../src/projection/leaderboard";
 import { lobbyEntry } from "../../src/projection/lobby-entry";
 import { frameWake } from "../../src/projection/wake";
 import { makeReplayStats, replayIdle } from "../../src/projection/stats";
@@ -33,26 +36,40 @@ export const DoomGames = StreamsyObject.make<Env, Layer.Success<ReturnType<typeo
   layer: gameLayer, links: env => [wakeLink.client(env.REPLAYS)], wakeups: [ProjectionWakeup.attach(frameWake)],
 });
 const initLobby = HttpRouter.add("POST", "/__init-lobby", Effect.gen(function* () {
-  yield* (yield* Entries).create({}, { ttlSeconds: 43200 });
+  yield* initLobbyStreams;
   return HttpServerResponse.empty({ status: 204 });
 }).pipe(Effect.orDie));
-const lobbyLayer = (state: DurableObjectState) => DurableObjectStorage.layer(lobbyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 });
+const lobbyLayer = (state: DurableObjectState) => stateTableMigration.pipe(
+  Layer.provideMerge(Layer.merge(CheckpointStore.layer, Transaction.layer)),
+  Layer.provideMerge(DurableObjectStorage.layer(lobbyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 })),
+);
+const boardSnapshot = HttpRouter.add("GET", "/doom/v2/state-snapshot/leaderboard", Effect.gen(function* () {
+  yield* initLobbyStreams;
+  const snapshot = yield* stateSnapshot(LeaderboardTable.at({}), ["game"]);
+  return HttpServerResponse.jsonUnsafe(snapshot.events, { headers: { "Stream-Next-Offset": snapshot.offset, "Cache-Control": "no-store" } });
+}).pipe(Effect.orDie));
 export const DoomLobby = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof lobbyLayer>>>({
-  app: Layer.mergeAll(Http.routes(lobbyStreams, { prefix: "/", access: "read" }), entriesLink.routes, initLobby),
-  layer: lobbyLayer, live: { websocket: true },
+  app: Layer.mergeAll(Http.routes(Streamsy.group(Leaderboard), { prefix: "/", access: "read" }), entriesLink.routes, initLobby, boardSnapshot),
+  layer: lobbyLayer, live: { websocket: true }, wakeups: [ProjectionWakeup.attach(leaderboard)],
 });
 
 function replayHost(id: string, state: DurableObjectState, env: Env, engines: ReplayEngines["Service"], snapshots: SnapshotTableApi): ObjectInstance {
   // Same concrete address as ReplayWake.at({id}), with no parameters. It is
   // intentionally local; only Sessions and Entries are ObjectLink services.
   class LocalWake extends Streamsy.wake<LocalWake>()("DoomV2/LocalWake", `doom/v2/replay-wake/${id}`, { params: {} }) {}
-  const layer = (owner: DurableObjectState) => CheckpointStore.layer.pipe(
+  const layer = (owner: DurableObjectState) => stateTableMigration.pipe(
+    Layer.provideMerge(Layer.merge(CheckpointStore.layer, Transaction.layer)),
     Layer.provideMerge(DurableObjectStorage.layer(Streamsy.group(ReplayWake, Game), { client: { storage: owner.storage } })),
     Layer.provideMerge(Layer.merge(Layer.succeed(ReplayEngines, engines), Layer.succeed(SnapshotTable, snapshots))),
   );
   const replayStats = makeReplayStats({ snapshotInterval: env.DOOM_SNAPSHOT_INTERVAL === undefined ? undefined : Number(env.DOOM_SNAPSHOT_INTERVAL) });
   const Host = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof layer>>, Sessions | Entries>({
-    app: Layer.mergeAll(wakeLink.routes, Http.routes(Streamsy.group(ReplayWake, Game), { prefix: "/", access: "read" }),
+    app: Layer.mergeAll(wakeLink.routes,
+      HttpRouter.add("GET", `/doom/v2/state-snapshot/games/${id}`, Effect.gen(function* () {
+        const snapshot = yield* gameSnapshot(id);
+        return HttpServerResponse.jsonUnsafe(snapshot.events, { headers: { "Stream-Next-Offset": snapshot.offset, "Cache-Control": "no-store" } });
+      }).pipe(Effect.catchTag("StreamNotFound", () => Effect.succeed(HttpServerResponse.empty({ status: 404, headers: { "Cache-Control": "no-store" } }))), Effect.orDie)),
+      Http.routes(Streamsy.group(ReplayWake, Game), { prefix: "/", access: "read" }),
       HttpRouter.add("POST", "/__init-replay", Effect.gen(function* () {
         const wake = yield* ReplayWake;
         const game = yield* Game;
@@ -121,7 +138,9 @@ export class DoomReplay {
       if (this.identity && snapshot.id !== this.identity) return new Response(null, { status: 404 });
       return snapshotResponse(request, snapshot, this.snapshots);
     }
-    if (!this.identity) return new Response("Replay not bootstrapped", { status: 409 });
+    if (!this.identity) return new Response("Replay not bootstrapped", {
+      status: path.startsWith("/doom/v2/state-snapshot/") ? 404 : 409, headers: { "Cache-Control": "no-store" },
+    });
     return this.acquire().fetch(request);
   }
   async webSocketMessage(...args: Parameters<ObjectInstance["webSocketMessage"]>) { await this.ready; await this.acquire().webSocketMessage(...args); }
@@ -139,6 +158,12 @@ export default {
     const snapshot = snapshotRoute(request);
     if (snapshot instanceof Response) return snapshot;
     if (snapshot) return env.REPLAYS.get(env.REPLAYS.idFromName(`replay:${snapshot.id}`)).fetch(request);
+    const stateRoute = stateSnapshotRoute(request);
+    if (stateRoute instanceof Response) return stateRoute;
+    if (stateRoute) return stateRoute.kind === "game"
+      ? env.REPLAYS.get(env.REPLAYS.idFromName(`replay:${stateRoute.id}`)).fetch(request)
+      : env.LOBBY.get(env.LOBBY.idFromName("lobby:v2")).fetch(request);
+    if (path === "/doom/v2/entries" || path.startsWith("/doom/v2/entries/")) return new Response(null, { status: 404 });
     if (path.startsWith("/doom/v2/bootstrap/")) {
       if (request.method !== "POST") return new Response(null, { status: 405 });
       const id = path.slice("/doom/v2/bootstrap/".length);

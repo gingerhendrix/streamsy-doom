@@ -30,7 +30,7 @@ captured frames. Both paths let the replay projection create snapshots every
 The browser has no snapshot write API. `SnapshotStore.entries()` reads the server
 list and `load(entry)` downloads one gzip snapshot and validates its metadata.
 V2 frame appends write no lobby progress; `writer.tic` stays local and server
-Game stats own published progress. `writer.row` and `Lobby.get(id)` use server-written `SessionMetadata` without progress fields. `Lobby.rows()` folds derived Entries rows. Fork validation uses the persisted
+Game stats own published progress. `writer.row` and `Lobby.get(id)` use server-written `SessionMetadata` without progress fields. `Lobby.rows()` reads the bounded Leaderboard snapshot. Metadata lookups read one Game snapshot. Fork validation uses the persisted
 batch manifest, so no browser progress heartbeat is needed.
 Call writer methods sequentially and use one writer per session. Expected-offset
 appends reject competing/stale writers. A failed network or metadata operation
@@ -68,8 +68,11 @@ Both hosts reject the removed namespace under `/doom/*` with 404.
 | `doom/v2/server-snapshots/:id/:tic` | gzip bytes, GET/HEAD only | `replay:<id>` table |
 | `doom/v2/replay-wake/:id` | State wake rows, publicly read-only | `replay:<id>` |
 | `doom/v2/games/:id` | State `stats`, `presence`, `session`; public read only | `replay:<id>` |
-| `doom/v2/entries` | State `entry`: session metadata plus nullable `score` summary and `live`; public read only | `lobby:v2` |
-| `doom/v2/bootstrap/:id` | POST validated session JSON; returns server metadata | `replay:<id>` (initializes Entries first) |
+| `doom/v2/entries` | State `entry`: session metadata plus nullable `score` summary and `live`; internal link only | `lobby:v2` |
+| `doom/v2/leaderboard` | State `game`: newest 50 entries, public read only | `lobby:v2` |
+| `doom/v2/state-snapshot/games/:id` | GET current session/stats/presence with State snapshot controls | `replay:<id>` |
+| `doom/v2/state-snapshot/leaderboard` | GET current board with State snapshot controls | `lobby:v2` |
+| `doom/v2/bootstrap/:id` | POST validated session JSON; returns server metadata | `replay:<id>` (initializes Entries and Leaderboard first) |
 | `doom/v2/end/:id`, `doom/v2/delete/:id` | POST session lifecycle | `replay:<id>` |
 
 Declarations in `v2.ts` use the published Streamsy 0.12.0 APIs. Cloudflare links
@@ -85,13 +88,13 @@ Stats emit on visible changes or a 175-tic bucket, retaining qualifying tics ins
 
 `lobbyEntry` (`doom-v2-lobby-entry`) folds Game session, stats and presence, coalescing each unit to at most one Entries change. Each entry contains the session fields, `live`, and `score: null` or `{ tic, episode, map, kills, deaths, items, secrets, alive, verified }`. The first stats, session changes and presence changes publish immediately. Further stats publish only after the 175-tic bucket advances. Metadata and presence can therefore exceed the stats-only cap. Larger units skip intermediate summaries; arbitrary unit splits can change the coalesced output sequence. Retries of a pinned unit produce identical output. Producer delivery is separate from the engine, with exponential backoff capped at 30 seconds. Expired Game delivers `gone` and removes the entry (verified in local workerd).
 
-Bootstrap accepts `{ playerName, skill, episode, map, forkedFrom, forkTic }`. The replay server trims player names, requires 1–40 characters, validates settings and `assertForkFamily`, and sets `createdAt` from its clock and `ended: false`. Repeating bootstrap preserves existing metadata and `createdAt`. End and delete write only the session collection. Public writes to Game and Entries fail. `Lobby.put`, `Lobby.delete`, `Lobby.init` and LobbyStream are removed. `Lobby.get(id)` reads that game's session collection; `Lobby.rows()` reads derived Entries. Routes remain unauthenticated.
+Bootstrap accepts `{ playerName, skill, episode, map, forkedFrom, forkTic }`. The replay server trims player names, requires 1–40 characters, validates settings and `assertForkFamily`, and sets `createdAt` from its clock and `ended: false`. Repeating bootstrap preserves existing metadata and `createdAt`. End and delete write only the session collection. Public writes to Game and Leaderboard fail; Entries is private. `Lobby.put`, `Lobby.delete`, `Lobby.init` and LobbyStream are removed. `Lobby.get(id)` reads that game's session row from its snapshot; `Lobby.rows()` reads the Leaderboard snapshot. Routes remain unauthenticated.
 
-`StateRows` folds upserts, updates, deletes, resets and snapshot controls. `followJson` catches up from `-1` then follows Cloudflare Game/Entries sockets, falling back to long poll. Binary batches apply only at their control frame; reconnects retain the last confirmed opaque offset. The DoomReplay wrapper forwards all three WebSocket handlers; tests force hibernation and receive subsequent stats. Bun attaches the same projections locally and uses long polling.
+`StateRows` folds upserts, updates, deletes, resets and snapshot controls. `followState` loads one snapshot then calls `followJson` from its returned offset. Cloudflare Game/Leaderboard sockets fall back to long poll. Binary batches apply only at their control frame; reconnects retain the last confirmed opaque offset. The DoomReplay wrapper forwards all three WebSocket handlers; tests force hibernation and receive subsequent stats. Bun attaches the same projections locally and uses long polling.
 
 Both game pages mount GameHud. Playing uses a 2,048-tic wall-time ring, samples only at stats arrival and displays the last latency plus the median of 20. Watching samples a rough tic lag against downloaded frames and labels the HUD as the head of the game even while seeking. Unknown tic times skip samples, forks label catch-up, and no stats for more than 350 local tics labels a stall. Lobby columns show Map, Kills, Deaths, Items and Secrets; health and armor stay in the live HUD.
 
-This batch still reads Game and Entries history from `-1`. No State snapshot read or leaderboard is provided. Observed lobby age starts on receipt in this tab; initial history has no server wall timestamp.
+Game pages and the lobby load State snapshots and follow from their offsets; no browser folds Game or all-games State history from `-1`. Observed lobby age starts on receipt in this tab; initial history has no server wall timestamp.
 
 Workerd topology tests build only the Worker and use no cloud credentials. Test
 bundles, SQLite state and logs use disposable temporary directories that are
@@ -105,7 +108,7 @@ have absolute `Stream-Expires-At` deadlines 24 hours after creation and no
 `Stream-TTL`; forks get their own creation deadline. Protocol reads with sliding
 TTL commit lifecycle touches in 0.12.0, which would requeue attached projections;
 absolute expiry prevents that feedback. The client and both replay bootstrap
-hosts use this policy. V2 Entries retains a 43200-second sliding TTL. Server
+hosts use this policy. Entries and Leaderboard have no expiry: neither projection nor browser reads commit TTL touches. Their logs grow until State trim is available. Server
 snapshot rows use the same absolute expiry as the replay wake stream. Watching
 cannot extend a v2 recording’s 24-hour life.
 
@@ -117,7 +120,8 @@ cannot extend a v2 recording’s 24-hour life.
 | `doom/v2/server-snapshots/<id>/<tic>` | gzip of metadata JSON line + version 2 heap delta | Same absolute deadline as replay wake |
 | `doom/v2/server-snapshots/<id>` | JSON `[{ tic, size }]` in tic order | Lists only unexpired rows |
 | `doom/v2/games/<id>` | State session, stats and presence | Same absolute deadline as replay wake |
-| `doom/v2/entries` | State derived lobby entries | Sliding, 43200 seconds |
+| `doom/v2/entries` | State derived lobby entries (internal only) | None |
+| `doom/v2/leaderboard` | State newest 50 games | None |
 
 The session header contains `formatVersion: 1`, snapshot identity `version: 2`,
 WAD SHA-256, WASM build SHA-256, skill, episode, map, `forkedFrom`, and `forkTic`.
@@ -185,3 +189,12 @@ maps, WADs or builds can exceed the 2,000,000-byte gzip guard; that snapshot is
 skipped while stats and the checkpoint continue. Snapshots trail the player by
 replay lag and do not reduce frame download on seek. Hosted memory at snapshot
 tics remains unmeasured.
+
+State snapshot reads sync unattached StateTables and list their collections in one
+storage transaction, returning `Stream-Next-Offset` and `Cache-Control: no-store`.
+`followJson` accepts `from`; `followState` applies a snapshot and follows from that
+offset. Bootstrap's session lookup and append share the same transaction.
+The `doom-v2-leaderboard` projection uses Entries as its sole input and
+`Commit.transaction`; it ranks by `createdAt` descending then `id`, retains 50,
+and removes deleted entries without a refill scan. The lobby streams do not expire;
+per-game expiry removes derived entries through `lobbyEntry`.

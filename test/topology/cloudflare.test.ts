@@ -11,6 +11,7 @@ import { snapshotEntries, snapshotBytes } from "../helpers/snapshots";
 import { initialStats, replayPages } from "../../src/projection/stats";
 import { concat, encode } from "../../src/streams/protocol";
 import type { StateEvent } from "../../src/streams/state";
+import { idOf, statsOf } from "../helpers/state";
 import type { StatsRow } from "../../src/streams/v2";
 import { ProtocolClient, createSession, forkSession, SessionReader, SnapshotStore, deleteSession, sessionPath, batchPath, indexPath, snapshotPath, familyOf, isFamilyId } from "../../src/streams";
 const scratch = await testScratch("topology");
@@ -50,6 +51,12 @@ async function harness(snapshotInterval?: number) {
     const live = events.filter(e => e.type === "presence").at(-1)?.value?.live ?? false;
     return events.filter(e => e.type === "stats" && e.value).map(e => ({ key: id, value: { ...e.value, live } as StatsRow & { live: boolean } }));
   }))).flat();
+  const entriesClient = new ProtocolClient("https://internal/__entries/", async (input, init) => {
+    const request = new Request(input, init), owner = await stub("LOBBY", "lobby:v2");
+    const response = await owner.fetch(request.url, { method: request.method, headers: Object.fromEntries(request.headers) });
+    return new Response(await response.arrayBuffer(), { status: response.status, headers: Object.fromEntries(response.headers) });
+  });
+  const entries = <T>() => entriesClient.json<T>("doom/v2/entries");
   const score = (id: string, tic: number, published = tic % 175 === 0) => until(async () => {
     const row = (await scores()).filter(row => row.key === id).at(-1)?.value;
     const replay = await stub("REPLAYS", `replay:${id}`);
@@ -57,7 +64,7 @@ async function harness(snapshotInterval?: number) {
     if (!row || (published && row.tic !== tic) || probe.engines[0]?.tic !== tic) return undefined;
     const { live, ...stats } = row; return stats;
   }, `score ${id} tic ${tic}`);
-  return { root, send, stub, client, score, scores, requests: () => requests, runtime: () => mf,
+  return { root, send, stub, client, entries, entriesClient, score, scores, requests: () => requests, runtime: () => mf,
     async restart() { await mf.dispose(); mf = start(); await mf.ready; }, async stop() { await mf.dispose(); } };
 }
 
@@ -113,7 +120,7 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and acc
     const replay = await h.stub("REPLAYS", `replay:${parent.row.id}`);
     expect((await replay.fetch(`https://internal/__bootstrap/${other.row.id}`, { method: "POST" })).status).toBe(409);
     for (const path of ["__entries/doom/v2/entries", `__wake/doom/v2/replay-wake/${parent.row.id}`, `__frames/${sessionPath(parent.row.id)}`, "__init-lobby", `__bootstrap/${parent.row.id}`]) expect((await h.send(path, { method: "POST" })).status).toBe(404);
-    for (const method of ["POST", "PUT", "DELETE"]) expect((await h.send("doom/v2/entries", { method, headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(405);
+    for (const method of ["POST", "PUT", "DELETE"]) expect((await h.send("doom/v2/entries", { method, headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(404);
     expect((await h.send(`doom/v2/replay-wake/${parent.row.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(405);
     await deleteSession(h.client, grandchild.row.id);
     await deleteSession(h.client, child.row.id);
@@ -147,7 +154,7 @@ test("workerd: two alarms, duplicate wake, partial frames, sink retry, persisted
     const game = await h.stub("GAMES", `game:${familyOf(id)}`), replay = await h.stub("REPLAYS", `replay:${id}`);
     const gameProbe = await (await game.fetch("https://internal/__test/probe")).json() as { alarm: number[] };
     const replayProbe = await (await replay.fetch("https://internal/__test/probe")).json() as { alarm: number[] };
-    await until(async () => (await h.client.json<any>("doom/v2/entries")).some(e => e.value?.score?.tic === 175) ? true : undefined, "entry 175");
+    await until(async () => (await h.entries<any>()).some(e => e.value?.score?.tic === 175) ? true : undefined, "entry 175");
     const sinkProbe = await (await lobby.fetch("https://internal/__test/probe")).json() as { scoreAt: number };
     const gameAt = gameProbe.alarm.find(time => time >= began)!;
     const replayAt = replayProbe.alarm.filter(time => time <= sinkProbe.scoreAt).at(-1)!;
@@ -178,9 +185,9 @@ test("workerd: two alarms, duplicate wake, partial frames, sink retry, persisted
     await h.score(id, 176);
     const reloaded = await h.stub("REPLAYS", `replay:${id}`);
     expect((await (await reloaded.fetch("https://internal/__test/probe")).json() as { identity: string }).identity).toBe(id);
-    const scoreOffset = (await h.send("doom/v2/entries", { method: "HEAD" })).headers.get("Stream-Next-Offset");
+    const scoreOffset = (await h.entriesClient.request("doom/v2/entries", { method: "HEAD" })).headers.get("Stream-Next-Offset");
     for (let n = 0; n < 2; n++) expect((await h.send(`doom/v2/bootstrap/${id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ playerName: "Counter", ...identity }) })).status).toBe(200);
-    expect((await h.send("doom/v2/entries", { method: "HEAD" })).headers.get("Stream-Next-Offset")).toBe(scoreOffset);
+    expect((await h.entriesClient.request("doom/v2/entries", { method: "HEAD" })).headers.get("Stream-Next-Offset")).toBe(scoreOffset);
     const resumedGame = await h.stub("GAMES", `game:${familyOf(id)}`);
     const quiet = await resumedGame.fetch(`https://internal/__test/quiet?path=/${sessionPath(id)}`, { method: "POST", body: new Uint8Array([...frames[176], ...frames[177]]) });
     expect(quiet.status).toBe(204);
@@ -242,7 +249,7 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
   } finally { await h.stop(); }
 }, 90000);
 
-test("workerd: absolute expiry leaves idle family, replay and lobby SQL bounded", async () => {
+test("workerd: non-expiring derived lobby and absolute-expiry games leave idle SQL bounded", async () => {
   const h = await harness(175);
   try {
     const writer = await createSession(h.client, { playerName: "Idle SQL", identity });
@@ -253,6 +260,15 @@ test("workerd: absolute expiry leaves idle family, replay and lobby SQL bounded"
       expect(head.headers.get("Stream-TTL")).toBeNull();
       expect(Date.parse(head.headers.get("Stream-Expires-At")!) - Date.now()).toBeGreaterThan(86_390_000);
     }
+    const lobby = await h.stub("LOBBY", "lobby:v2");
+    for (const path of ["doom/v2/leaderboard", "__entries/doom/v2/entries"]) {
+      const head = await lobby.fetch(`https://internal/${path}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("Stream-TTL")).toBeNull();
+      expect(head.headers.get("Stream-Expires-At")).toBeNull();
+    }
+    // Exercise browser snapshot reads too: they must leave no TTL touch work.
+    expect((await h.send("doom/v2/state-snapshot/leaderboard")).status).toBe(200);
     const owners = await Promise.all([h.stub("GAMES", `game:${familyOf(writer.row.id)}`), h.stub("REPLAYS", `replay:${writer.row.id}`), h.stub("LOBBY", "lobby:v2")]);
     const counts = () => Promise.all(owners.map(async owner => (await (await owner.fetch("https://internal/__test/probe")).json() as { queries: number }).queries));
     await Bun.sleep(250);
@@ -291,8 +307,8 @@ test("workerd: steady five-tic commits publish local Game stats and capped lobby
       lag.push(sink.scoreAt - commit.frameAt);
     }
     expect(lag.length).toBeGreaterThan(10);
-    await until(async () => (await h.client.json<any>("doom/v2/entries")).some(e => e.value?.id === writer.row.id && e.value.score?.tic === 350) ? true : undefined, "capped entry tail");
-    const summaries = (await h.client.json<any>("doom/v2/entries")).filter(e => e.value?.id === writer.row.id && e.value.score);
+    await until(async () => (await h.entries<any>()).some(e => e.value?.id === writer.row.id && e.value.score?.tic === 350) ? true : undefined, "capped entry tail");
+    const summaries = (await h.entries<any>()).filter(e => e.value?.id === writer.row.id && e.value.score);
     const later = summaries.filter(e => e.value.score.tic > 0);
     expect(later.map(e => e.value.score.tic)).toEqual([175, 350]);
     lag.sort((a, b) => a - b); append.sort((a, b) => a - b);
@@ -322,7 +338,7 @@ test("workerd: a lost score response retries producer output without duplicate r
       const probe = await (await lobby.fetch("https://internal/__test/probe")).json() as { scorePosts: number };
       return probe.scorePosts >= before.scorePosts + 2 ? true : undefined;
     }, "producer delivery retry");
-    const rows = (await h.client.json<{ key: string; value: import("../../src/streams/v2").EntryRow }>("doom/v2/entries")).filter(row => row.key === writer.row.id && row.value.score);
+    const rows = (await h.entries<{ key: string; value: import("../../src/streams/v2").EntryRow }>()).filter(row => row.key === writer.row.id && row.value.score);
     expect([...new Set(rows.map(row => row.value.score!.tic))]).toEqual([0, 175]);
     expect(rows.filter(row => row.value.score!.tic === 175)).toHaveLength(1);
     expect(rows.at(-1)?.value.score).toMatchObject({ verified: true, kills: 0, deaths: 0 });
@@ -333,18 +349,18 @@ test("workerd: a lost score response retries producer output without duplicate r
   } finally { await h.stop(); }
 }, 15000);
 
-test("workerd: Game socket survives forced hibernation; Entries/polling receive server lifecycle", async () => {
-  const { followJson, StateRows, Lobby } = await import("../../src/streams");
+test("workerd: Game socket survives forced hibernation; Leaderboard/polling receive server lifecycle", async () => {
+  const { followState, StateRows, Lobby } = await import("../../src/streams");
   const h = await harness(), abort = new AbortController(), tasks: Promise<void>[] = [];
   try {
     const browser = new ProtocolClient((await h.runtime().ready).href);
     const writer = await createSession(browser, { playerName: "Live HUD", identity });
     const metadata = new StateRows<import("../../src/streams/v2").SessionMetadata>("session");
-    const entries = new StateRows<import("../../src/streams/v2").EntryRow>("entry");
+    const entries = new StateRows<import("../../src/streams/v2").EntryRow>("game");
     let gameSocket: WebSocket | undefined;
     const socketStats = new StateRows<StatsRow>("stats"), pollStats = new StateRows<StatsRow>("stats"), modes: string[] = [];
-    tasks.push(followJson<StateEvent<any>>(browser, "doom/v2/entries", { signal: abort.signal, onBatch: e => entries.apply(e), onTransport: mode => modes.push(`entries:${mode}`) }));
-    for (const [state, websocket] of [[socketStats, true], [pollStats, false]] as const) tasks.push(followJson<StateEvent<any>>(browser, `doom/v2/games/${writer.row.id}`, {
+    tasks.push(followState<StateEvent<any>>(browser, { snapshot: "doom/v2/state-snapshot/leaderboard", stream: "doom/v2/leaderboard", signal: abort.signal, onBatch: e => entries.apply(e), onTransport: mode => modes.push(`entries:${mode}`) }));
+    for (const [state, websocket] of [[socketStats, true], [pollStats, false]] as const) tasks.push(followState<StateEvent<any>>(browser, { snapshot: `doom/v2/state-snapshot/games/${writer.row.id}`, stream: `doom/v2/games/${writer.row.id}`,
       signal: abort.signal, websocket, socket: websocket ? url => (gameSocket = new WebSocket(url)) : undefined, onBatch: e => { state.apply(e); metadata.apply(e); }, onTransport: mode => modes.push(`${websocket ? "socket" : "poll"}:${mode}`),
     }));
     await until(async () => modes.includes("entries:websocket") && modes.includes("socket:websocket") && modes.includes("poll:long-poll") ? true : undefined, "subscriptions");
@@ -361,7 +377,7 @@ test("workerd: Game socket survives forced hibernation; Entries/polling receive 
     expect(modes).not.toContain("socket:long-poll");
     await writer.end();
     await until(async () => metadata.rows.get(writer.row.id)?.ended && entries.rows.get(writer.row.id)?.ended ? true : undefined, "end metadata");
-    for (const path of [`doom/v2/games/${writer.row.id}`, "doom/v2/entries"]) for (const method of ["PUT", "POST", "DELETE"]) {
+    for (const path of [`doom/v2/games/${writer.row.id}`, "doom/v2/leaderboard"]) for (const method of ["PUT", "POST", "DELETE"]) {
       expect((await fetch(new URL(path, browser.baseUrl), { method, headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(405);
     }
     await deleteSession(browser, writer.row.id);
@@ -483,7 +499,7 @@ test("workerd: expired local Game input delivers gone and deletes its entry", as
     await h.score(writer.row.id, 0);
     const entries = async () => {
       const { StateRows } = await import("../../src/streams");
-      const rows = new StateRows<any>("entry"); rows.apply(await h.client.json("doom/v2/entries")); return rows.rows;
+      const rows = new StateRows<any>("entry"); rows.apply(await h.entries()); return rows.rows;
     };
     await until(async () => (await entries()).has(writer.row.id) ? true : undefined, "entry before expiry");
     const replay = await h.stub("REPLAYS", `replay:${writer.row.id}`);
@@ -492,3 +508,92 @@ test("workerd: expired local Game input delivers gone and deletes its entry", as
     console.log("MEASURED local workerd: expired local Game delivered gone to lobbyEntry and removed its Entries row");
   } finally { await h.stop(); }
 }, 15000);
+
+test("workerd: HUD snapshot stays small after 5,000 stats changes and follows changes after its offset", async () => {
+  const { followState, StateRows, Lobby } = await import("../../src/streams");
+  const h = await harness(), abort = new AbortController();
+  let task: Promise<void> | undefined;
+  try {
+    const id = idOf(7000), path = `doom/v2/state-snapshot/games/${id}`;
+    expect((await h.send(path)).status).toBe(404);
+    const metadata = { ...identity, playerName: "Snapshot HUD", forkedFrom: null, forkTic: null };
+    await h.client.request(`doom/v2/bootstrap/${id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(metadata) });
+    const replay = await h.stub("REPLAYS", `replay:${id}`);
+    const seed = (rows: StatsRow[]) => replay.fetch("https://internal/__test/game-events", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, rows }) });
+    expect((await seed(Array.from({ length: 5000 }, (_, tic) => statsOf(id, tic)))).status).toBe(204);
+    const began = performance.now(), response = await h.send(path), text = await response.text(), elapsedMs = performance.now() - began;
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const offset = response.headers.get("Stream-Next-Offset")!;
+    expect(offset).toBeTruthy();
+    const events = JSON.parse(text) as StateEvent<StatsRow>[];
+    expect(events.filter(e => e.value)).toHaveLength(2); // session and latest stats, no presence input
+    expect(events[0].headers.control).toBe("snapshot-start");
+    expect(events.at(-1)?.headers.control).toBe("snapshot-end");
+    expect(events.find(e => e.type === "stats")?.value?.tic).toBe(4999);
+    const history = await h.client.json<StateEvent<StatsRow>>(`doom/v2/games/${id}`);
+    const fold = new StateRows<StatsRow>("stats"), loaded = new StateRows<StatsRow>("stats");
+    fold.apply(history); loaded.apply(events); expect(loaded.rows).toEqual(fold.rows);
+    const measurement = { historyStatsRows: 5000, snapshotRows: 2, snapshotBytes: new TextEncoder().encode(text).length, snapshotRequestMs: elapsedMs,
+      historyBytes: new TextEncoder().encode(JSON.stringify(history)).length, environment: "local workerd, synthetic valid stats; HTTP round trip including first table sync" };
+    await Bun.write(`${h.root}/state-snapshot-measurement.json`, JSON.stringify(measurement, null, 2));
+    console.log(`MEASURED workerd Game snapshot: ${JSON.stringify(measurement)}`);
+    const requests: URL[] = [], state = new StateRows<StatsRow>("stats");
+    const browser = new ProtocolClient((await h.runtime().ready).href, async (input, init) => {
+      const url = new URL(String(input)); requests.push(url);
+      const result = await fetch(input, init);
+      if (url.pathname === `/${path}`) {
+        // Insert a real write after snapshot completion, before follow begins.
+        await result.clone().arrayBuffer();
+        expect((await seed([statsOf(id, 5000), statsOf(id, 5000)])).status).toBe(204);
+      }
+      return result;
+    });
+    task = followState<StateEvent<StatsRow>>(browser, { snapshot: path, stream: `doom/v2/games/${id}`, signal: abort.signal, websocket: false,
+      onBatch: batch => { state.apply(batch); if (state.rows.get(id)?.tic === 5000) abort.abort(); } });
+    await task;
+    expect(requests[0].pathname).toBe(`/${path}`);
+    expect(requests[1].searchParams.get("offset")).toBe(offset);
+    expect(requests.some(url => url.searchParams.get("offset") === "-1")).toBe(false);
+    expect(state.rows.get(id)?.tic).toBe(5000);
+    const before = h.requests();
+    expect((await new Lobby(h.client).get(id)).playerName).toBe("Snapshot HUD");
+    expect(h.requests() - before).toBe(1);
+    for (const method of ["POST", "PUT", "DELETE", "HEAD"]) expect((await h.send(path, { method })).status).toBe(405);
+    expect((await h.send("doom/v2/state-snapshot/games/invalid")).status).toBe(400);
+    expect((await h.send("__test/game-events", { method: "POST" })).status).toBe(404);
+  } finally { abort.abort(); await task; await h.stop(); }
+}, 30000);
+
+test("workerd: cold leaderboard snapshot is empty; 60 server sessions load the newest 50", async () => {
+  const h = await harness();
+  try {
+    const path = "doom/v2/state-snapshot/leaderboard";
+    const cold = await h.send(path);
+    expect(cold.status).toBe(200);
+    expect(await cold.json()).toEqual([{ headers: { control: "snapshot-start" } }, { headers: { control: "snapshot-end" } }]);
+    const sessions = [];
+    for (let n = 1; n <= 60; n++) {
+      const row = await (await h.client.request(`doom/v2/bootstrap/${idOf(n)}`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...identity, playerName: `Board ${n}`, forkedFrom: null, forkTic: null }) })).json() as import("../../src/streams/v2").SessionMetadata;
+      sessions.push(row);
+    }
+    const expected = sessions.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)).slice(0, 50);
+    await until(async () => {
+      const events = await (await h.send(path)).json() as StateEvent<any>[];
+      return events.some(e => e.key === expected[0].id) && events.filter(e => e.value).length === 50 ? true : undefined;
+    }, "leaderboard catches up");
+    const began = performance.now(), response = await h.send(path), text = await response.text(), elapsedMs = performance.now() - began;
+    const events = JSON.parse(text) as StateEvent<import("../../src/streams/v2").EntryRow>[];
+    expect(events.filter(e => e.value).map(e => e.key).sort()).toEqual(expected.map(e => e.id).sort());
+    expect(events.filter(e => e.value)).toHaveLength(50);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Stream-Next-Offset")).toBeTruthy();
+    const measurement = { sessions: 60, snapshotRows: 50, snapshotBytes: new TextEncoder().encode(text).length, snapshotRequestMs: elapsedMs,
+      environment: "local workerd, real bootstrap session metadata, HTTP round trip after projection catch-up" };
+    await Bun.write(`${h.root}/leaderboard-snapshot-measurement.json`, JSON.stringify(measurement, null, 2));
+    console.log(`MEASURED workerd Leaderboard snapshot: ${JSON.stringify(measurement)}`);
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE"]) expect((await h.send("doom/v2/entries", { method })).status).toBe(404);
+    for (const method of ["POST", "PUT", "DELETE"]) expect((await h.send(path, { method })).status).toBe(405);
+  } finally { await h.stop(); }
+}, 30000);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { ProtocolClient, StateRows, followJson } from "../../src/streams";
+import { ProtocolClient, StateRows, followState } from "../../src/streams";
 import type { StatsRow, PresenceRow, SessionMetadata, GameEvent } from "../../src/streams/v2";
 /** Wall times are keyed by exact tic; wrapping never returns an older tic's time. */
 export class TicClock {
@@ -47,7 +47,7 @@ export class GameHud {
     readonly options: { head: () => number; clock?: TicClock; onError: (error: unknown) => void }) {
     this.latency = new HudLatency(options.clock);
     this.render();
-    void followJson<GameEvent>(client, `doom/v2/games/${id}`, { signal: this.abort.signal, onBatch: events => {
+    void followState<GameEvent>(client, { snapshot: `doom/v2/state-snapshot/games/${id}`, stream: `doom/v2/games/${id}`, signal: this.abort.signal, onBatch: events => {
       this.stats.apply(events); this.presence.apply(events); this.sessions.apply(events);
       if (events.some(event => event.type === "stats" && event.value)) {
         const row = this.stats.rows.get(id);

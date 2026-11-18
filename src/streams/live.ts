@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { ProtocolClient, ProtocolError } from "./protocol";
+import { ProtocolClient, ProtocolError, offsetOf } from "./protocol";
 
 export type LiveTransport = "catch-up" | "websocket" | "long-poll";
 export interface FollowOptions<T> {
   signal: AbortSignal;
+  from?: string;
   onBatch: (events: T[]) => void;
   onTransport?: (transport: LiveTransport) => void;
   // Injection also lets a browser-shaped client exercise the real workerd socket.
@@ -27,7 +28,7 @@ const retryDelay = (signal: AbortSignal) => new Promise<void>(resolve => {
  */
 export async function followJson<T>(client: ProtocolClient, path: string, options: FollowOptions<T>) {
   const { signal, onBatch, onTransport } = options;
-  let offset = "-1", cursor: string | undefined, live = false;
+  let offset = options.from ?? "-1", cursor: string | undefined, live = false;
   let useSocket = options.websocket !== false && (options.socket !== undefined || typeof WebSocket !== "undefined");
   try {
     while (!signal.aborted) {
@@ -91,4 +92,17 @@ export async function followJson<T>(client: ProtocolClient, path: string, option
       live = false;
     }
   } catch (error) { if (!signal.aborted) throw error; }
+}
+
+/** Apply one consistent State snapshot, then resume at its opaque offset. */
+export async function followState<T>(client: ProtocolClient, options: FollowOptions<T> & { snapshot: string; stream: string }) {
+  try {
+    const response = await client.request(options.snapshot, { signal: options.signal });
+    const events = await response.json();
+    if (!Array.isArray(events)) throw new Error("Expected State snapshot array");
+    const from = offsetOf(response);
+    if (options.signal.aborted) return;
+    options.onBatch(events);
+    await followJson<T>(client, options.stream, { ...options, from });
+  } catch (error) { if (!options.signal.aborted) throw error; }
 }

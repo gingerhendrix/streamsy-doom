@@ -59,9 +59,10 @@ test("RNG drift stays unverified while later frames continue; counters reset on 
 test("durable projection identities are pinned", async () => {
   const { replayStats, replayIdle } = await import("../../src/projection/stats");
   const { lobbyEntry } = await import("../../src/projection/lobby-entry");
+  const { leaderboard } = await import("../../src/projection/leaderboard");
   const { frameWake } = await import("../../src/projection/wake");
-  expect([frameWake.id, replayStats.id, replayIdle.id, lobbyEntry.id]).toEqual([
-    "doom-v2-frame-wake", "doom-v2-replay", "doom-v2-replay-idle", "doom-v2-lobby-entry",
+  expect([frameWake.id, replayStats.id, replayIdle.id, lobbyEntry.id, leaderboard.id]).toEqual([
+    "doom-v2-frame-wake", "doom-v2-replay", "doom-v2-replay-idle", "doom-v2-lobby-entry", "doom-v2-leaderboard",
   ]);
 });
 test("lobby summary caps stats at 175 tics, flushes session/presence, and deletes on gone", async () => {

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Test-only observability and fault injection. The public Worker is unchanged.
 import type { DurableObjectState } from "@cloudflare/workers-types";
+import { Effect } from "effect";
+import { Streamsy } from "@streamsy/core";
+import { DurableObjectStorage } from "@streamsy/storage/durable-object";
+import { Game, type StatsRow } from "../../src/streams/v2";
 import worker, { DoomGames as Games, DoomReplay as Replay, DoomLobby as Lobby, type Env } from "../../apps/host-cloudflare/worker";
 export { DoomStreams } from "../../apps/host-cloudflare/worker";
 export default worker;
@@ -59,6 +63,18 @@ export class DoomReplay extends Replay {
     await super.alarm();
   }
   override async fetch(request: Request) {
+    if (new URL(request.url).pathname === "/__test/game-events") {
+      const { id, rows } = await request.json() as { id: string; rows: StatsRow[] };
+      // Test-only writer using the published storage API, on this replay's SQL.
+      await Effect.runPromise(Effect.gen(function* () {
+        const game = yield* Game;
+        for (let at = 0; at < rows.length; at += 500) {
+          const events = rows.slice(at, at + 500).map(value => ({ type: "stats" as const, key: id, value, headers: { operation: "upsert" as const } }));
+          if (events.length) yield* game.append({ id }, [events[0], ...events.slice(1)]);
+        }
+      }).pipe(Effect.provide(DurableObjectStorage.layer(Streamsy.group(Game), { client: { storage: this.probeState.storage } }))));
+      return new Response(null, { status: 204 });
+    }
     if (new URL(request.url).pathname === "/__test/oversize") {
       await this.probeState.storage.put("test-oversize", true); return new Response(null, { status: 204 });
     }

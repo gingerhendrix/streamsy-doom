@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { Effect, Stream } from "effect";
+import { Effect } from "effect";
 import { assertForkFamily, familyOf } from "../streams/ids";
 import { Game, type SessionMetadata } from "../streams/v2";
-import { StateRows } from "../streams/state";
+import { Transaction } from "@streamsy/projection";
+import { GameTable } from "./state-snapshot";
 
 export function sessionInput(id: string, input: unknown): Omit<SessionMetadata, "id" | "createdAt" | "ended"> {
   familyOf(id);
@@ -24,21 +25,30 @@ export function sessionInput(id: string, input: unknown): Omit<SessionMetadata, 
   }
   return { playerName: value.playerName.trim(), skill, episode, map, forkedFrom, forkTic: forkTic as number | null };
 }
+// Lookup and every read-modify-write share the storage transaction on both hosts.
+const sessionAt = (id: string) => Effect.gen(function* () {
+  yield* (yield* Game).head({ id });
+  const table = GameTable.at({ id });
+  yield* table.sync();
+  return (yield* table.get("session", id)).value;
+});
 export const readSession = (id: string) => Effect.gen(function* () {
-  const rows = new StateRows<SessionMetadata>("session");
-  yield* (yield* Game).read({ id }).pipe(Stream.runForEach(batch => Effect.sync(() => rows.apply(batch.items))));
-  return rows.rows.get(id);
+  return yield* (yield* Transaction).withTransaction(sessionAt(id));
 });
 export const bootstrapSession = (id: string, input: ReturnType<typeof sessionInput>) => Effect.gen(function* () {
-  const existing = yield* readSession(id);
-  if (existing) return existing;
-  const row: SessionMetadata = { ...input, id, createdAt: new Date().toISOString(), ended: false };
-  yield* (yield* Game).append({ id }, [{ type: "session", key: id, value: row, headers: { operation: "upsert" } }]);
-  return row;
+  return yield* (yield* Transaction).withTransaction(Effect.gen(function* () {
+    const existing = yield* sessionAt(id);
+    if (existing) return existing;
+    const row: SessionMetadata = { ...input, id, createdAt: new Date().toISOString(), ended: false };
+    yield* (yield* Game).append({ id }, [{ type: "session", key: id, value: row, headers: { operation: "upsert" } }]);
+    return row;
+  }));
 });
 export const changeSession = (id: string, action: "end" | "delete") => Effect.gen(function* () {
-  const row = yield* readSession(id);
-  if (!row) return false;
-  yield* (yield* Game).append({ id }, [action === "delete" ? { type: "session", key: id, headers: { operation: "delete" } } : { type: "session", key: id, value: { ...row, ended: true }, headers: { operation: "upsert" } }]);
-  return true;
+  return yield* (yield* Transaction).withTransaction(Effect.gen(function* () {
+    const row = yield* sessionAt(id);
+    if (!row) return false;
+    yield* (yield* Game).append({ id }, [action === "delete" ? { type: "session", key: id, headers: { operation: "delete" } } : { type: "session", key: id, value: { ...row, ended: true }, headers: { operation: "upsert" } }]);
+    return true;
+  }));
 });

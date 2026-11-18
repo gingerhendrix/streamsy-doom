@@ -29,6 +29,14 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
     }
     expect(await new Lobby(client).rows()).toEqual([]);
     const writer = await createSession(client, { playerName: "Bun", identity });
+    const boardHead = await client.request("doom/v2/leaderboard", { method: "HEAD" });
+    expect(boardHead.headers.get("Stream-TTL")).toBeNull();
+    expect(boardHead.headers.get("Stream-Expires-At")).toBeNull();
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE"])
+      expect((await fetch(new URL("doom/v2/entries", host.url), { method })).status).toBe(404);
+    const unknown = "f".repeat(32) + "_" + "f".repeat(32);
+    expect((await fetch(new URL(`doom/v2/state-snapshot/games/${unknown}`, host.url))).status).toBe(404);
+
     await writer.append(frames.slice(0, 175));
     let rows: { type: string; value: { tic: number } }[] = [];
     for (let n = 0; n < 100; n++) {
@@ -47,7 +55,7 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
     expect(requests).toBe(before);
     const child = await forkSession(client, writer.row.id, 10, { playerName: "Child" });
     expect(familyOf(child.row.id)).toBe(familyOf(writer.row.id));
-    const response = await fetch(new URL("doom/v2/entries", host.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" });
+    const response = await fetch(new URL("doom/v2/leaderboard", host.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" });
     expect(response.status).toBe(405);
     expect((await fetch(new URL("__scores/doom/v2/scores", host.url), { method: "POST" })).status).toBe(404);
     expect((await fetch(new URL("doom/v2/sessions/not-valid", host.url), { method: "PUT" })).status).toBe(404);
@@ -93,12 +101,12 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
     console.log(`MEASURED Bun: family/replay/lobby shared database idle SQL queries in 1s=${idle}`);
     expect(idle).toBeLessThanOrEqual(5);
     await Bun.sleep(30_000);
-    const idleRows = await client.json<{ key: string; value: import("../../src/streams/v2").EntryRow }>("doom/v2/entries");
+    const idleRows = await client.json<{ key: string; value: import("../../src/streams/v2").EntryRow }>("doom/v2/leaderboard");
     expect(idleRows.filter(row => row.key === parent.row.id).at(-1)?.value).toMatchObject({ live: false, score: { tic: 175, verified: true } });
     expect(idleRows.filter(row => row.key === child.row.id).at(-1)?.value.live).toBe(false);
     await parent.append(frames.slice(175, 350));
     for (let n = 0; n < 100; n++) {
-      const rows = await client.json<{ key: string; value: { score: { tic: number }; live: boolean } }>("doom/v2/entries");
+      const rows = await client.json<{ key: string; value: { score: { tic: number }; live: boolean } }>("doom/v2/leaderboard");
       const row = rows.filter(row => row.key === parent.row.id).at(-1)?.value;
       if (row?.score?.tic === 350) { expect(row.live).toBe(true); break; }
       if (n === 99) throw new Error("Bun replay did not resume after idle eviction");
@@ -150,7 +158,7 @@ test("Bun bootstrap serializes repeated metadata creation and rejects browser St
     expect(events.filter(e => e.type === "session")).toHaveLength(1);
     const sessions = new StateRows<any>("session"); sessions.apply(events);
     expect(sessions.rows.get(writer.row.id).createdAt).not.toBe(payload.createdAt);
-    for (const path of [`doom/v2/games/${writer.row.id}`, "doom/v2/entries"]) for (const method of ["PUT", "POST", "DELETE"]) {
+    for (const path of [`doom/v2/games/${writer.row.id}`, "doom/v2/leaderboard"]) for (const method of ["PUT", "POST", "DELETE"]) {
       expect((await fetch(new URL(path, host.url), { method, headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(405);
     }
     await expect(client.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, forkedFrom: "f".repeat(32) + "_" + "1".repeat(32), forkTic: 0 }) })).rejects.toMatchObject({ status: 400 });
