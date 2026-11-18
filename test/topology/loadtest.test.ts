@@ -4,9 +4,10 @@ import { mkdtemp } from "node:fs/promises";
 import { testScratch } from "../helpers/scratch";
 import { Miniflare } from "miniflare";
 import { bundleWorker } from "../../scripts/bundle-worker";
+import { snapshotEntries } from "../helpers/snapshots";
 import { prepareRecording } from "../../scripts/loadtest/recording";
 import { runScenario, validate, percentiles, summarize, type Result, type Options, type Scenario } from "../../scripts/loadtest/runner";
-import { ProtocolClient, Lobby, createSession, deleteSession, sessionPath, batchPath, indexPath } from "../../src/streams";
+import { ProtocolClient, Lobby, createSession, deleteSession, sessionPath, batchPath } from "../../src/streams";
 const scratch = await testScratch("loadtest");
 const fixture = await prepareRecording(400);
 const options = (target: string, scenario: Scenario): Options => ({ target, scenario, players: 2, tics: 20, depth: 2,
@@ -31,7 +32,7 @@ test("loadtest scenarios run against real workerd with engine replay, socket fal
   const scriptPath = await bundleWorker("test/topology/probe-worker.ts", `${root}/bundle`);
   const start = (port?: number) => new Miniflare({ rootPath: root, modulesRoot: `${root}/bundle`,
     modules: [{ type: "ESModule", path: scriptPath }, { type: "CompiledWasm", path: `${root}/bundle/doom.wasm` }],
-    port, compatibilityDate: "2026-07-30", compatibilityFlags: ["nodejs_compat"], cf: false,
+    port, bindings: { DOOM_SNAPSHOT_INTERVAL: "35" }, compatibilityDate: "2026-07-30", compatibilityFlags: ["nodejs_compat"], cf: false,
     assets: { directory: new URL("../../dist", import.meta.url).pathname, binding: "ASSETS",
       routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },
     durableObjects: { STREAMS: { className: "DoomStreams", useSQLite: true }, GAMES: { className: "DoomGames", useSQLite: true },
@@ -58,8 +59,10 @@ test("loadtest scenarios run against real workerd with engine replay, socket fal
       expect(result.cleaned).toHaveLength(result.ids.length);
       expect(result.observations.some(r => r.tic > 0 && r.verified)).toBe(true);
       expect((await new Lobby(client).rows()).filter(r => result.ids.includes(r.id))).toHaveLength(0);
-      for (const id of result.ids) for (const path of [sessionPath(id), batchPath(id), indexPath(id)]) {
-        expect((await fetch(new URL(path, target), { method: "HEAD" })).status).toBe(404);
+      for (const id of result.ids) {
+        for (const path of [sessionPath(id), batchPath(id)]) expect((await fetch(new URL(path, target), { method: "HEAD" })).status).toBe(404);
+        // The read-only list still exists; gone frames clear any server rows.
+        expect(await snapshotEntries(client, id, [])).toEqual([]);
       }
       if (scenario === "families" || scenario === "lobby") expect(result.transports.some(r => r.mode === "websocket")).toBe(true);
       if (scenario === "siblings") expect(result.transports.some(r => r.mode === "long-poll")).toBe(true);

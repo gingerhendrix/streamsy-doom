@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { ProtocolClient, SessionReader, SnapshotStore, Lobby, createSession, forkSession, deleteSession,
-  sessionPath, batchPath, indexPath, newSessionId, newForkId, followJson, type SessionWriter, type StateEvent } from "../../src/streams";
+import { ProtocolClient, SessionReader, Lobby, createSession, forkSession, deleteSession,
+  sessionPath, batchPath, newSessionId, newForkId, followJson, type SessionWriter, type StateEvent } from "../../src/streams";
 import type { StatsRow } from "../../src/streams/v2";
 import { serverEngine } from "../../apps/host-bun/engine";
 import type { Recording } from "./recording";
@@ -88,13 +88,9 @@ export async function cleanup(client: ProtocolClient, ids: string[], cleaned: st
     try {
       try { await deleteSession(client, id); }
       catch {
-        // A create may fail before the row/index exists. Still remove only our known paths.
+        // A create may fail before the metadata row exists. Still remove only our known paths.
         const row = (await new Lobby(client).rows()).find(row => row.id === id);
         if (row) await new Lobby(client).delete(row);
-        try { await new SnapshotStore(client, id).delete(); } catch {
-          // No snapshots are uploaded by this harness; an absent index is safe.
-          await client.remove(indexPath(id));
-        }
         await client.remove(batchPath(id));
       }
       // After browser cleanup, remove our frame stream too (children first).

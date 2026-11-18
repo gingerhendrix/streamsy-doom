@@ -4,7 +4,10 @@ import { mkdtemp } from "node:fs/promises";
 import { testScratch } from "../helpers/scratch";
 import { Miniflare } from "miniflare";
 import { bundleWorker } from "../../scripts/bundle-worker";
-import { recording, createHeadless } from "../helpers/recording";
+import { createEngine } from "../../engine/src/engine.js";
+import { SNAPSHOT_INTERVAL } from "../../src/streams/snapshots";
+import { recording, createHeadless, wad, wasmBinary } from "../helpers/recording";
+import { snapshotEntries, snapshotBytes } from "../helpers/snapshots";
 import { initialStats, replayPages } from "../../src/projection/stats";
 import { concat, encode } from "../../src/streams/protocol";
 import type { StateEvent } from "../../src/streams/state";
@@ -18,7 +21,7 @@ const until = async <A>(probe: () => Promise<A | undefined>, label: string): Pro
   throw new Error(`Timed out: ${label}`);
 };
 type Score = { key: string; value: StatsRow };
-async function harness() {
+async function harness(snapshotInterval?: number) {
   const root = await mkdtemp(`${scratch}/workerd-`);
   const scriptPath = await bundleWorker("test/topology/probe-worker.ts", `${root}/bundle`);
   const start = () => new Miniflare({ rootPath: root, modulesRoot: `${root}/bundle`,
@@ -26,6 +29,7 @@ async function harness() {
     assets: { directory: new URL("../../dist", import.meta.url).pathname, binding: "ASSETS", routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },
     durableObjects: { STREAMS: { className: "DoomStreams", useSQLite: true }, GAMES: { className: "DoomGames", useSQLite: true }, REPLAYS: { className: "DoomReplay", useSQLite: true }, LOBBY: { className: "DoomLobby", useSQLite: true } },
     durableObjectsPersist: `${root}/state`,
+    bindings: snapshotInterval === undefined ? {} : { DOOM_SNAPSHOT_INTERVAL: String(snapshotInterval) },
   });
   let mf = start();
   await mf.ready;
@@ -51,7 +55,7 @@ async function harness() {
 }
 
 test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and access policies", async () => {
-  const h = await harness();
+  const h = await harness(5);
   try {
     const parent = await createSession(h.client, { playerName: "Parent", identity });
     const other = await createSession(h.client, { playerName: "Other", identity });
@@ -59,7 +63,7 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and acc
     expect(familyOf(parent.row.id)).not.toBe(familyOf(other.row.id));
     await parent.append(frames.slice(0, 12));
     const store = new SnapshotStore(h.client, parent.row.id);
-    for (const tic of [5, 10]) await store.write({ ...identity, tic, heap: new Uint8Array([tic]) });
+    await snapshotEntries(h.client, parent.row.id, [5, 10]);
     const child = await forkSession(h.client, parent.row.id, 7, { playerName: "Child" });
     const sibling = await forkSession(h.client, parent.row.id, 10, { playerName: "Sibling" });
     const grandchild = await forkSession(h.client, child.row.id, 6, { playerName: "Grandchild" });
@@ -67,7 +71,7 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and acc
     for (const writer of [child, sibling, grandchild]) {
       expect(familyOf(writer.row.id)).toBe(familyOf(parent.row.id));
       const family = await h.stub("GAMES", owner);
-      for (const path of [sessionPath(writer.row.id), batchPath(writer.row.id), indexPath(writer.row.id), snapshotPath(writer.row.id, 5)]) expect((await family.fetch(`https://internal/${path}`, { method: "HEAD" })).status).toBe(200);
+      for (const path of [sessionPath(writer.row.id), batchPath(writer.row.id)]) expect((await family.fetch(`https://internal/${path}`, { method: "HEAD" })).status).toBe(200);
     }
     expect(`game:${familyOf(other.row.id)}`).not.toBe(owner);
     // Verify actual owners by reading through the named namespace stubs.
@@ -77,8 +81,9 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and acc
     expect(await h.runtime().listDurableObjectIds("GAMES")).toHaveLength(2);
     const reader = await new SessionReader(h.client, grandchild.row.id).catchUp();
     expect(reader.frames).toEqual(frames.slice(0, 6));
-    expect((await new SnapshotStore(h.client, child.row.id).entries()).map(entry => entry.tic)).toEqual([5]);
-    expect(await h.client.all(snapshotPath(child.row.id, 5))).toEqual(await h.client.all(snapshotPath(parent.row.id, 5)));
+    expect((await snapshotEntries(h.client, child.row.id, [5])).map(entry => entry.tic)).toEqual([5]);
+    await snapshotEntries(h.client, grandchild.row.id, [5]);
+    expect(await snapshotBytes(h.client, child.row.id, 5)).toEqual(await snapshotBytes(h.client, parent.row.id, 5));
     const engine = { identity, tic: 0, snapshot() { return { ...identity, tic: this.tic, heap: new Uint8Array([this.tic]) }; }, restore(checkpoint: { tic: number }) { this.tic = checkpoint.tic; }, step() { this.tic++; return new Uint8Array(9); } };
     expect(await reader.seek(engine, 6)).toEqual({ snapshotTic: 5, replayed: 1 });
     await grandchild.append(frames.slice(6, 9));
@@ -105,7 +110,7 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and acc
     expect((await h.send(`doom/v2/replay-wake/${parent.row.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(405);
     await deleteSession(h.client, grandchild.row.id);
     await deleteSession(h.client, child.row.id);
-    for (const path of [snapshotPath(child.row.id, 5), batchPath(child.row.id), indexPath(child.row.id)]) expect((await h.send(path, { method: "HEAD" })).status).toBe(404);
+    for (const path of [batchPath(child.row.id)]) expect((await h.send(path, { method: "HEAD" })).status).toBe(404);
     expect((await h.send(snapshotPath(parent.row.id, 5), { method: "HEAD" })).status).toBe(200);
     expect((await h.send(sessionPath(child.row.id), { method: "HEAD" })).status).toBe(200);
     for (const path of ["doom/lobby", "doom/sessions/old-game", "doom/arbitrary"]) {
@@ -190,7 +195,7 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
     const row = await h.score(writer.row.id, 21000);
     const coldMs = performance.now() - began;
     const localEngine = await createHeadless(log.identity);
-    const expected = replayPages(initialStats(), [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames.slice(0, 21000)])], localEngine, writer.row.id);
+    const expected = await replayPages(initialStats(), [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames.slice(0, 21000)])], localEngine, writer.row.id);
     expect(row).toEqual(expected.state.row!);
     expect(row).toMatchObject({ kills: 5, deaths: 2, verified: true });
     const replay = await h.stub("REPLAYS", `replay:${writer.row.id}`);
@@ -201,14 +206,13 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
     await writer.append(log.frames.slice(21000, 21175));
     const rebuilt = await h.score(writer.row.id, 21175);
     const rebuildMs = performance.now() - rebuild;
-    const expectedRebuilt = replayPages(expected.state, log.frames.slice(21000, 21175), localEngine, writer.row.id);
+    const expectedRebuilt = await replayPages(expected.state, log.frames.slice(21000, 21175), localEngine, writer.row.id);
     expect(rebuilt).toEqual(expectedRebuilt.state.row!);
     const child = await forkSession(h.client, writer.row.id, 2100, { playerName: "Inherited death" });
     const childRow = await h.score(child.row.id, 2100);
     expect(childRow).toMatchObject({ kills: 3, deaths: 1, verified: true });
-    // A poisoned player heap is present, but neither initial replay nor rebuild
-    // reads snapshot routes: all verification comes from the input timeline.
-    await new SnapshotStore(h.client, writer.row.id).write({ ...log.identity, tic: 21175, heap: new Uint8Array([255]) });
+    // Player heaps cannot be uploaded. Cache rebuild still uses inputs from zero.
+    await expect(h.client.append(snapshotPath(writer.row.id, 21175), new Uint8Array([255]))).rejects.toMatchObject({ status: 405 });
     await replay.fetch("https://internal/__test/evict", { method: "POST" });
     await writer.append(log.frames.slice(21175, 21350));
     expect((await h.score(writer.row.id, 21350)).verified).toBe(true);
@@ -231,10 +235,11 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
 }, 90000);
 
 test("workerd: absolute expiry leaves idle family, replay and lobby SQL bounded", async () => {
-  const h = await harness();
+  const h = await harness(175);
   try {
     const writer = await createSession(h.client, { playerName: "Idle SQL", identity });
     await writer.append(frames.slice(0, 175)); await h.score(writer.row.id, 175);
+    await snapshotEntries(h.client, writer.row.id, [175]);
     for (const path of [sessionPath(writer.row.id), batchPath(writer.row.id), `doom/v2/replay-wake/${writer.row.id}`]) {
       const head = await h.send(path, { method: "HEAD" });
       expect(head.headers.get("Stream-TTL")).toBeNull();
@@ -258,11 +263,11 @@ test("workerd: steady five-tic frame commits publish scores through both alarm h
     const writer = await createSession(h.client, { playerName: "Score lag", identity: log.identity });
     await h.score(writer.row.id, 0);
     const engine = await createHeadless(log.identity);
-    let state = replayPages(initialStats(), [encode({ ...log.identity, formatVersion: 1 })], engine, writer.row.id).state;
+    let state = (await replayPages(initialStats(), [encode({ ...log.identity, formatVersion: 1 })], engine, writer.row.id)).state;
     const game = await h.stub("GAMES", `game:${familyOf(writer.row.id)}`), lobby = await h.stub("LOBBY", "lobby:v2");
     const lag: number[] = [], append: number[] = [];
     for (let at = 0; at < log.frames.length; at += 5) {
-      const next = replayPages(state, log.frames.slice(at, at + 5), engine, writer.row.id); state = next.state;
+      const next = await replayPages(state, log.frames.slice(at, at + 5), engine, writer.row.id); state = next.state;
       const started = performance.now();
       await writer.append(log.frames.slice(at, at + 5));
       append.push(performance.now() - started);
@@ -346,4 +351,70 @@ test("workerd: browser lobby WebSockets and long-poll receive replay-chain score
     expect(socketScores.rows.has(writer.row.id)).toBe(true);
     console.log("MEASURED local workerd: session and score WebSocket upgrades succeeded; both WebSocket and long-poll received replay score tic 175, then live end/delete metadata");
   } finally { abort.abort(); await Promise.all(tasks); await h.stop(); }
+}, 30000);
+
+
+test("workerd: default 21000-tic server snapshot restores, renders and replays 1000 matching tics", async () => {
+  expect(SNAPSHOT_INTERVAL).toBe(21000);
+  const log = await recording(22000), h = await harness();
+  try {
+    const writer = await createSession(h.client, { playerName: "Server snapshot restore", identity: log.identity });
+    await writer.append(log.frames);
+    const entries = await snapshotEntries(h.client, writer.row.id, [21000]);
+    const entry = entries[0], bytes = await snapshotBytes(h.client, writer.row.id, entry.tic);
+    expect(bytes.length).toBe(entry.size); expect(entry.size).toBeLessThanOrEqual(2000000);
+    const table = await h.stub("REPLAYS", `replay:${writer.row.id}`);
+    const rows = await (await table.fetch("https://internal/__test/snapshots")).json() as { expires_at: number }[];
+    const head = await h.send(`doom/v2/replay-wake/${writer.row.id}`, { method: "HEAD" });
+    expect(rows[0].expires_at).toBe(Date.parse(head.headers.get("Stream-Expires-At")!));
+    const original = await createEngine(wad, { wasmBinary }), restored = await createEngine(wad, { wasmBinary });
+    for (const frame of log.frames.slice(0, 21000)) original.step(frame);
+    restored.restore(await new SnapshotStore(h.client, writer.row.id).load(entry));
+    expect(restored.hash()).toBe(original.hash());
+    for (const frame of log.frames.slice(21000)) {
+      original.step(frame); restored.step(frame); restored.render();
+      expect(restored.hash()).toBe(original.hash()); expect(restored.stats()).toEqual(original.stats());
+    }
+    expect(restored.driftCount).toBe(0);
+    const measurement = (await (await table.fetch("https://internal/__test/probe")).json() as { snapshot: unknown }).snapshot;
+    console.log(`MEASURED local workerd server snapshot: ${JSON.stringify(measurement)}; browser-style restore + 1000 rendered tics: RNG drift=0, state/hash mismatches=0`);
+  } finally { await h.stop(); }
+}, 30000);
+
+test("workerd: snapshot endpoints reject writes, retry/restart keeps one row, expiry and gone frames clean up", async () => {
+  const h = await harness(175);
+  try {
+    const writer = await createSession(h.client, { playerName: "Snapshot lifecycle", identity });
+    await h.score(writer.row.id, 0);
+    const id = writer.row.id, replay = await h.stub("REPLAYS", `replay:${id}`), lobby = await h.stub("LOBBY", "lobby:v2");
+    const rows = async () => await (await (await h.stub("REPLAYS", `replay:${id}`)).fetch("https://internal/__test/snapshots")).json() as { tic: number; size: number }[];
+    const posts = (await (await lobby.fetch("https://internal/__test/probe")).json() as { scorePosts: number }).scorePosts;
+    await lobby.fetch("https://internal/__test/fail-score-response", { method: "POST" });
+    await writer.append(frames.slice(0, 175));
+    await snapshotEntries(h.client, id, [175]);
+    const first = await snapshotBytes(h.client, id, 175);
+    await until(async () => (await (await lobby.fetch("https://internal/__test/probe")).json() as { scorePosts: number }).scorePosts >= posts + 2 ? true : undefined, "snapshot unit retry");
+    expect((await rows()).map(({ tic, size }) => ({ tic, size }))).toEqual([{ tic: 175, size: first.length }]);
+    expect(await snapshotBytes(h.client, id, 175)).toEqual(first);
+    for (const path of [indexPath(id), snapshotPath(id, 175)]) {
+      for (const method of ["PUT", "POST", "DELETE", "PATCH", "OPTIONS"]) expect((await h.send(path, { method })).status).toBe(405);
+      const head = await h.send(path, { method: "HEAD" }); expect(head.status).toBe(200); expect((await head.arrayBuffer()).byteLength).toBe(0);
+    }
+    expect((await h.send(snapshotPath(id, 0))).status).toBe(404);
+    for (const path of [`doom/v2/server-snapshots/bad`, `${indexPath(id)}/-1`, `${indexPath(id)}/1.5`, `${indexPath(id)}/9007199254740992`]) expect((await h.send(path)).status).toBe(400);
+    for (const path of [`doom/v2/snapshots/${id}/175`, `doom/v2/snapshot-index/${id}`]) expect([400, 404]).toContain((await h.send(path, { method: "PUT" })).status);
+    await h.restart();
+    expect((await h.send(`doom/v2/replay-wake/${id}`, { method: "HEAD" })).status).toBe(200);
+    expect(await rows()).toHaveLength(1); expect(await snapshotBytes(h.client, id, 175)).toEqual(first);
+    const reloaded = await h.stub("REPLAYS", `replay:${id}`);
+    await reloaded.fetch("https://internal/__test/expire-snapshots", { method: "POST" });
+    expect(await new SnapshotStore(h.client, id).entries()).toEqual([]);
+    expect((await h.send(snapshotPath(id, 175))).status).toBe(404);
+    // Reads only filter expired rows; the next snapshot write removes them.
+    expect(await rows()).toHaveLength(1);
+    const next = await recording(350, false); await writer.append(next.frames.slice(175));
+    await snapshotEntries(h.client, id, [350]); expect((await rows()).map(row => row.tic)).toEqual([350]);
+    await h.client.remove(sessionPath(id));
+    await until(async () => (await rows()).length === 0 ? true : undefined, "gone frames delete snapshots");
+  } finally { await h.stop(); }
 }, 30000);

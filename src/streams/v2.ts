@@ -11,10 +11,6 @@ export class Batches extends Streamsy.json<Batches>()("DoomV2/Batches", "doom/v2
     batch: Schema.optionalKey(Schema.Struct({ startTic: Schema.Number, endTic: Schema.Number, before: Schema.String, after: Schema.String })),
   }),
 }) {}
-export class SnapshotIndex extends Streamsy.bytes<SnapshotIndex>()("DoomV2/SnapshotIndex", "doom/v2/snapshot-index/:id", { params }) {}
-export class Snapshots extends Streamsy.bytes<Snapshots>()("DoomV2/Snapshots", "doom/v2/snapshots/:id/:tic", {
-  params: { ...params, tic: Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]*)$/)) },
-}) {}
 export class ReplayWake extends Streamsy.wake<ReplayWake>()("DoomV2/ReplayWake", "doom/v2/replay-wake/:id", { params }) {}
 export const SessionRowSchema = Schema.Struct({
   id: SessionId, playerName: Schema.String, skill: Schema.Number, episode: Schema.Number, map: Schema.Number,
@@ -37,6 +33,6 @@ export type StatsRow = typeof StatsRowSchema.Type;
 export class Scores extends Streamsy.state<Scores>()("DoomV2/Scores", "doom/v2/scores", {
   params: {}, collections: { stats: { schema: StatsRowSchema, key: "id" } },
 }) {}
-export const familyStreams = Streamsy.group(Sessions, Batches, SnapshotIndex, Snapshots);
+export const familyStreams = Streamsy.group(Sessions, Batches);
 export const lobbyStreams = Streamsy.group(LobbyStream, Scores);
-export const allStreams = Streamsy.group(Sessions, Batches, SnapshotIndex, Snapshots, ReplayWake, LobbyStream, Scores);
+export const allStreams = Streamsy.group(Sessions, Batches, ReplayWake, LobbyStream, Scores);

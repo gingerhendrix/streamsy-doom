@@ -20,6 +20,12 @@ limits, cleanup recovery, and optional analytics. Example:
 bun run loadtest -- --target https://streamsy-doom-test.gingerhendrix.workers.dev --scenario families --players 10 --seconds 30 --out /path/to/scratch/families-10.json
 ```
 
+These measurements predate server-made snapshots. The current replay projection
+writes gzip BLOBs to its own SQLite table every 21,000 tics; the browser reads a
+snapshot list and one tic through GET/HEAD-only endpoints. Snapshot/index browser
+writes and snapshot fork streams have been removed. Snapshot-time CPU, memory
+and sibling-fork lag need fresh hosted measurements before comparing releases.
+
 ## Method
 
 The browser's shared clients perform bootstrap, stream creation, expected-offset

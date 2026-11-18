@@ -69,7 +69,7 @@ test("workerd headless engine starts under nodejs_compat, matches Bun, and measu
       resetAndReplayRequestMs: replay.ms, repeatResetAndReplayRequestMs: coldRebuild.ms,
       warmFiveTicRequests: { n: warm.length, p50: warm[100], p95: warm[190], max: warm.at(-1) },
       drift: replay.value.drift, statsMatchBun: true, isolateMemoryApiAvailable: replay.value.memoryAvailable },
-      inferred: { sharedWadBytes: 28795076, sharedBaselineBytes: 16777216, heapBytesPerEngine: 16777216 },
+      inferred: { sharedWadBytes: 28795076, sharedBaselineBytes: 16777216, heapBytesPerEngine: 16777216, postInitBaselineBytesPerEngine: 16777216 },
       limits: "Request round trips, not CPU counters. Reset/replay excludes frame storage and projection alarms. Projection score lag is measured separately in projection-lag.json." };
     await Bun.write(`${scratch}/engine-measurements.json`, JSON.stringify(measurements, null, 2) + "\n");
     console.log("MEASURED local workerd engine: " + JSON.stringify(measurements));

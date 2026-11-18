@@ -39,14 +39,30 @@ export class DoomReplay extends Replay {
   private readonly queries: () => number;
   constructor(private readonly probeState: DurableObjectState, env: Env) {
     const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
+    const create = this.engines.create;
+    this.engines.create = async identity => {
+      const engine = await create(identity), snapshot = engine.snapshot;
+      engine.snapshot = async () => {
+        const began = performance.now(), bytes = await snapshot();
+        await this.probeState.storage.put("test-snapshot-measurement", { tic: engine.tic, bytes: bytes.length,
+          compressionMs: performance.now() - began, isolateMemoryApiAvailable: "memory" in performance,
+          inferredPostInitBaselineBytes: 16777216, inferredXorChunkBytes: 65536 });
+        return bytes;
+      };
+      return engine;
+    };
   }
   override async alarm() {
     await this.probeState.storage.put("test-alarm", [...(await this.probeState.storage.get<number[]>("test-alarm") ?? []), Date.now()]);
     await super.alarm();
   }
   override async fetch(request: Request) {
+    if (new URL(request.url).pathname === "/__test/expire-snapshots") {
+      this.probeState.storage.sql.exec("UPDATE server_snapshots SET expires_at = 0"); return new Response(null, { status: 204 });
+    }
+    if (new URL(request.url).pathname === "/__test/snapshots") return Response.json([...this.probeState.storage.sql.exec("SELECT tic,size,expires_at FROM server_snapshots ORDER BY tic")]);
     if (new URL(request.url).pathname === "/__test/evict") { this.engines.cache.clear(); return new Response(null, { status: 204 }); }
-    if (new URL(request.url).pathname === "/__test/probe") return Response.json({ queries: this.queries(), alarm: await this.probeState.storage.get("test-alarm"), identity: await this.probeState.storage.get("doom-v2-session-id"), engines: [...this.engines.cache.values()].map(engine => engine.stats()), armed: await this.probeState.storage.getAlarm() });
+    if (new URL(request.url).pathname === "/__test/probe") return Response.json({ queries: this.queries(), snapshot: await this.probeState.storage.get("test-snapshot-measurement"), alarm: await this.probeState.storage.get("test-alarm"), identity: await this.probeState.storage.get("doom-v2-session-id"), engines: [...this.engines.cache.values()].map(engine => engine.stats()), armed: await this.probeState.storage.getAlarm() });
     return super.fetch(request);
   }
 }

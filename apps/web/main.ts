@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionWriter, type Checkpoint, StateRows, followJson, type StateEvent } from "../../src/streams";
+import { Lobby, ProtocolClient, SessionReader, SnapshotStore, createSession, deleteSession, forkSession, type SessionWriter, SNAPSHOT_INTERVAL, StateRows, followJson, type StateEvent } from "../../src/streams";
 import type { SessionMetadata, StatsRow } from "../../src/streams/v2";
 import type { Engine } from "../../engine/src/engine.js";
 import { FixedStep, FrameQueue } from "./timing";
@@ -142,10 +142,10 @@ async function play(game: Engine, writer: SessionWriter) {
   const canvas = document.querySelector<HTMLCanvasElement>("canvas")!;
   const store = new SnapshotStore(client, writer.row.id);
   let snapshotTic = (await store.entries()).at(-1)?.tic ?? 0, stopped = false, raf = 0;
-  const queue = new FrameQueue<Checkpoint>(async (frames, checkpoints) => {
-    await writer.append(frames);
-    for (const checkpoint of checkpoints) { await store.write(checkpoint); snapshotTic = checkpoint.tic; }
-  });
+  const queue = new FrameQueue(async frames => { await writer.append(frames); });
+  const pollSnapshots = window.setInterval(() => {
+    void store.entries().then(entries => { snapshotTic = entries.at(-1)?.tic ?? 0; }).catch(fail);
+  }, 5000);
   const clock = new FixedStep();
   const { runtime } = await assets!;
   const keyboard = new KeyboardControls(runtime.keys, (code, down) => game.key(code, down));
@@ -157,19 +157,19 @@ async function play(game: Engine, writer: SessionWriter) {
   const tick = (now: number) => {
     if (stopped) return;
     try {
-      if (document.hasFocus()) clock.advance(now, () => { const frame = game.step(); queue.push(frame, game.tic % writer.snapshotInterval === 0 ? game.snapshot() : undefined); });
+      if (document.hasFocus()) clock.advance(now, () => { const frame = game.step(); queue.push(frame); });
       else clock.pause();
       // About five tics per batch, while the drain coalesces work behind slow writes.
       if (queue.pending >= 5) void queue.flush().catch(fail);
       if (queue.error) throw queue.error;
       paint(game);
-      document.querySelector("#metrics")!.textContent = `Tic ${game.tic} · Pending frames ${queue.pending} · Batch ${queue.latency.toFixed(1)} ms · Snapshot ${snapshotTic || `pending at ${writer.snapshotInterval}`}`;
+      document.querySelector("#metrics")!.textContent = `Tic ${game.tic} · Pending frames ${queue.pending} · Batch ${queue.latency.toFixed(1)} ms · Snapshot ${snapshotTic || `pending at ${SNAPSHOT_INTERVAL}`}`;
       raf = requestAnimationFrame(tick);
     } catch (error) { fail(error); }
   };
-  const fail = (error: unknown) => { stopped = true; cancelAnimationFrame(raf); release(); report(error); };
+  const fail = (error: unknown) => { stopped = true; cancelAnimationFrame(raf); clearInterval(pollSnapshots); release(); report(error); };
   dispose = async () => {
-    stopped = true; cancelAnimationFrame(raf); release();
+    stopped = true; cancelAnimationFrame(raf); clearInterval(pollSnapshots); release();
     window.removeEventListener("keydown", key); window.removeEventListener("keyup", key); window.removeEventListener("blur", release); canvas.removeEventListener("blur", release);
     await queue.flush(); await writer.end();
   };

@@ -10,9 +10,8 @@ interface Manifest { headerOffset?: string; batch?: BatchBoundary }
 export class SessionWriter {
   private busy = false;
   private tickCount: number;
-  constructor(readonly client: ProtocolClient, public row: SessionMetadata, public offset: string, readonly snapshotInterval = 4200) {
+  constructor(readonly client: ProtocolClient, public row: SessionMetadata, public offset: string) {
     this.tickCount = row.forkTic ?? 0;
-    if (!Number.isInteger(snapshotInterval) || snapshotInterval < 1) throw new Error("Invalid snapshot interval");
   }
   get tic() { return this.tickCount; }
   async append(frames: Uint8Array[]) {
@@ -30,24 +29,20 @@ export class SessionWriter {
       return batch;
     } finally { this.busy = false; }
   }
-  // Drive one engine batch, capturing exact interval boundaries even inside a POST.
+  // Drive one engine batch; the server derives snapshots from the appended inputs.
   async record(engine: ReplayEngine, count: number, input: (tic: number) => void = () => {}) {
     if (engine.tic !== this.tic) throw new Error("Engine/writer tic mismatch");
     if (!Number.isInteger(count) || count < 1) throw new Error("Invalid count");
-    const frames: Uint8Array[] = [], checkpoints = [];
+    const frames: Uint8Array[] = [];
     for (let i = 0; i < count; i++) {
       input(engine.tic); frames.push(engine.step());
-      if (engine.tic % this.snapshotInterval === 0) checkpoints.push(engine.snapshot());
     }
-    const batch = await this.append(frames);
-    const store = new SnapshotStore(this.client, this.row.id);
-    for (const checkpoint of checkpoints) await store.write(checkpoint);
-    return batch;
+    return this.append(frames);
   }
   async end() { this.row = { ...this.row, ended: true }; await new Lobby(this.client).put(this.row); }
 }
 export async function createSession(client: ProtocolClient, options: {
-  id?: string; playerName: string; identity: Identity; snapshotInterval?: number;
+  id?: string; playerName: string; identity: Identity;
 }) {
   const id = options.id ?? newSessionId();
   familyOf(id);
@@ -57,11 +52,10 @@ export async function createSession(client: ProtocolClient, options: {
   const response = await client.create(sessionPath(id), encode(header));
   const offset = offsetOf(response);
   await client.create(batchPath(id), JSON.stringify([{ headerOffset: offset }]), "application/json");
-  await new SnapshotStore(client, id).init();
   const row: SessionMetadata = { id, playerName: options.playerName, skill: header.skill, episode: header.episode, map: header.map,
     createdAt: new Date().toISOString(), ended: false, forkedFrom: null, forkTic: null };
   await lobby.put(row);
-  return new SessionWriter(client, row, offset, options.snapshotInterval);
+  return new SessionWriter(client, row, offset);
 }
 export class SessionReader {
   header?: SessionHeader;
@@ -116,7 +110,7 @@ export class SessionReader {
   }
 }
 export async function forkSession(client: ProtocolClient, parentId: string, tic: number, options: {
-  id?: string; playerName: string; snapshotInterval?: number;
+  id?: string; playerName: string;
 }) {
   uint32(tic);
   const id = options.id ?? newForkId(parentId);
@@ -143,15 +137,13 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   await client.create(batchPath(id), JSON.stringify([{ headerOffset }]), "application/json");
   for (let i = 0; i < childBatches.length; i += 1000)
     await client.append(batchPath(id), JSON.stringify(childBatches.slice(i, i + 1000)), "application/json");
-  await new SnapshotStore(client, parentId).forkTo(id, tic);
   const row: SessionMetadata = { ...parent, id, playerName: options.playerName, ended: false,
     createdAt: new Date().toISOString(), forkedFrom: parentId, forkTic: tic };
   await lobby.put(row);
-  return new SessionWriter(client, row, childOffset, options.snapshotInterval);
+  return new SessionWriter(client, row, childOffset);
 }
 export async function deleteSession(client: ProtocolClient, id: string) {
   const lobby = new Lobby(client), row = await lobby.get(id);
-  await new SnapshotStore(client, id).delete();
   await client.remove(batchPath(id));
   await lobby.delete(row);
 }

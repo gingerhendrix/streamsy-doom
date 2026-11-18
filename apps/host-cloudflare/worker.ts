@@ -10,12 +10,14 @@ import { DurableObjectStorage } from "@streamsy/storage/durable-object";
 import { familyOf } from "../../src/streams/ids";
 import { familyStreams, lobbyStreams, ReplayWake, LobbyStream, Scores, Sessions } from "../../src/streams/v2";
 import { frameWake } from "../../src/projection/wake";
-import { replayStats, replayIdle } from "../../src/projection/stats";
+import { makeReplayStats, replayIdle } from "../../src/projection/stats";
+import { SnapshotTable, snapshotTable, type SnapshotTableApi, type SqlValue } from "../../src/projection/snapshots";
+import { snapshotRoute, snapshotResponse } from "../../src/server/snapshots";
 import { ReplayEngines } from "../../src/projection/engines";
 import { serverEngine } from "./engine";
 import { placement, framesLink, wakeLink, scoresLink } from "./topology";
 
-export interface Env { STREAMS: DurableObjectNamespace; GAMES: DurableObjectNamespace; REPLAYS: DurableObjectNamespace; LOBBY: DurableObjectNamespace; ASSETS: Fetcher }
+export interface Env { DOOM_SNAPSHOT_INTERVAL?: string; STREAMS: DurableObjectNamespace; GAMES: DurableObjectNamespace; REPLAYS: DurableObjectNamespace; LOBBY: DurableObjectNamespace; ASSETS: Fetcher }
 // Retain the deployed class/binding identity until a provider migration is reviewed.
 // It never acquires storage or serves the removed protocol namespace.
 export class DoomStreams {
@@ -38,14 +40,15 @@ export const DoomLobby = StreamsyObject.make<Env, Layer.Success<ReturnType<typeo
   layer: lobbyLayer, live: { websocket: true },
 });
 
-function replayHost(id: string, state: DurableObjectState, env: Env, engines: ReplayEngines["Service"]): ObjectInstance {
+function replayHost(id: string, state: DurableObjectState, env: Env, engines: ReplayEngines["Service"], snapshots: SnapshotTableApi): ObjectInstance {
   // Same concrete address as ReplayWake.at({id}), with no parameters. It is
   // intentionally local; only Sessions and Scores are ObjectLink services.
   class LocalWake extends Streamsy.wake<LocalWake>()("DoomV2/LocalWake", `doom/v2/replay-wake/${id}`, { params: {} }) {}
   const layer = (owner: DurableObjectState) => CheckpointStore.layer.pipe(
     Layer.provideMerge(DurableObjectStorage.layer(Streamsy.group(ReplayWake), { client: { storage: owner.storage } })),
-    Layer.provideMerge(Layer.succeed(ReplayEngines, engines)),
+    Layer.provideMerge(Layer.merge(Layer.succeed(ReplayEngines, engines), Layer.succeed(SnapshotTable, snapshots))),
   );
+  const replayStats = makeReplayStats({ snapshotInterval: env.DOOM_SNAPSHOT_INTERVAL === undefined ? undefined : Number(env.DOOM_SNAPSHOT_INTERVAL) });
   const Host = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof layer>>, Sessions | Scores>({
     app: Layer.mergeAll(wakeLink.routes, Http.routes(Streamsy.group(ReplayWake), { prefix: "/", access: "read" }),
       HttpRouter.add("POST", "/__init-replay", Effect.gen(function* () {
@@ -65,16 +68,23 @@ function replayHost(id: string, state: DurableObjectState, env: Env, engines: Re
 // StreamsyObject APIs. Once saved, identity selects one layer graph per lifetime.
 export class DoomReplay {
   protected readonly engines: ReplayEngines["Service"];
+  protected readonly snapshots: SnapshotTableApi;
   private identity?: string;
   private host?: ObjectInstance;
   private readonly ready: Promise<void>;
   constructor(private readonly owner: DurableObjectState, private readonly bindings: Env) {
+    const sql = owner.storage.sql;
+    const values = (items: SqlValue[]) => items.map(item => item instanceof Uint8Array ? item.slice().buffer : item);
+    this.snapshots = snapshotTable({
+      run: (query, items) => { sql.exec(query, ...values(items)); },
+      all: <A>(query: string, items: SqlValue[]) => [...sql.exec(query, ...values(items))] as A[],
+    }, false);
     this.engines = { cache: new Map(), create: async identity => (await serverEngine(bindings))(identity) };
     this.ready = owner.blockConcurrencyWhile(async () => { this.identity = await owner.storage.get<string>("doom-v2-session-id"); });
   }
   private acquire() {
     if (!this.identity) throw new Error("Replay not bootstrapped");
-    return this.host ??= replayHost(this.identity, this.owner, this.bindings, this.engines);
+    return this.host ??= replayHost(this.identity, this.owner, this.bindings, this.engines, this.snapshots);
   }
   async fetch(request: Request): Promise<Response> {
     await this.ready;
@@ -91,6 +101,12 @@ export class DoomReplay {
       if (!accepted) return new Response("Replay identity conflict", { status: 409 });
       return this.acquire().fetch(new Request("https://internal/__init-replay", { method: "POST" }));
     }
+    const snapshot = snapshotRoute(request);
+    if (snapshot instanceof Response) return snapshot;
+    if (snapshot) {
+      if (this.identity && snapshot.id !== this.identity) return new Response(null, { status: 404 });
+      return snapshotResponse(request, snapshot, this.snapshots);
+    }
     if (!this.identity) return new Response("Replay not bootstrapped", { status: 409 });
     return this.acquire().fetch(request);
   }
@@ -103,6 +119,9 @@ export default {
   async fetch(request: WorkerRequest<unknown, IncomingRequestCfProperties>, env: Env, context: ExecutionContext) {
     const path = new URL(request.url).pathname;
     if (path.startsWith("/__")) return new Response(null, { status: 404 });
+    const snapshot = snapshotRoute(request);
+    if (snapshot instanceof Response) return snapshot;
+    if (snapshot) return env.REPLAYS.get(env.REPLAYS.idFromName(`replay:${snapshot.id}`)).fetch(request);
     if (path.startsWith("/doom/v2/bootstrap/")) {
       if (request.method !== "POST") return new Response(null, { status: 405 });
       const id = path.slice("/doom/v2/bootstrap/".length);

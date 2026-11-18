@@ -11,19 +11,17 @@ export class FixedStep {
   }
   pause() { this.previous = undefined; this.debt = 0; }
 }
-// One serialized drain includes frame POST, manifest and checkpoints.
+// One serialized drain includes frame POST and manifest.
 // Fail closed: never retry an ambiguous append or run later work after failure.
-export class FrameQueue<T> {
+export class FrameQueue {
   private frames: Uint8Array[] = [];
-  private checkpoints: T[] = [];
   private running?: Promise<void>;
   error?: unknown;
   latency = 0;
   pending = 0;
-  constructor(private readonly persist: (frames: Uint8Array[], checkpoints: T[]) => Promise<void>) {}
-  push(frame: Uint8Array, checkpoint?: T) {
+  constructor(private readonly persist: (frames: Uint8Array[]) => Promise<void>) {}
+  push(frame: Uint8Array) {
     this.frames.push(frame); this.pending++;
-    if (checkpoint !== undefined) this.checkpoints.push(checkpoint);
   }
   flush(): Promise<void> {
     if (this.error) return Promise.reject(this.error);
@@ -33,8 +31,8 @@ export class FrameQueue<T> {
   }
   private async drain() {
     while (this.frames.length) {
-      const frames = this.frames.splice(0), checkpoints = this.checkpoints.splice(0), start = performance.now();
-      await this.persist(frames, checkpoints);
+      const frames = this.frames.splice(0), start = performance.now();
+      await this.persist(frames);
       this.pending -= frames.length; this.latency = performance.now() - start;
     }
   }

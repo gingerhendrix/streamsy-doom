@@ -32,12 +32,12 @@ test("headless stats match the browser at every tic, including deaths and restar
 
 test("producer row sequence and cumulative checkpoint are independent of byte page and unit size", async () => {
   const engine = await createHeadless(log.identity);
-  const expected = replayPages(initialStats(), [bytes], engine, id);
+  const expected = await replayPages(initialStats(), [bytes], engine, id);
   for (const size of [1, 8, 9, 47, 2048, 65536]) {
     engine.reset(log.identity);
     let state = initialStats(); const rows = [];
     for (let at = 0; at < bytes.length; at += size) {
-      const next = replayPages(state, [bytes.subarray(at, at + size)], engine, id);
+      const next = await replayPages(state, [bytes.subarray(at, at + size)], engine, id);
       // Exercise the exact durable JSON checkpoint round trip.
       state = JSON.parse(JSON.stringify(next.state)); rows.push(...next.rows);
     }
@@ -49,7 +49,7 @@ test("producer row sequence and cumulative checkpoint are independent of byte pa
 test("RNG drift stays unverified while later frames continue; counters reset on map changes", async () => {
   const engine = await createHeadless(log.identity);
   const bad = bytes.slice(); bad[bad.length - 1] ^= 1;
-  const result = replayPages(initialStats(), [bad], engine, id);
+  const result = await replayPages(initialStats(), [bad], engine, id);
   expect(result.state.row).toMatchObject({ tic: 21000, verified: false, kills: 5, deaths: 2 });
   expect(result.rows.at(-1)?.verified).toBe(false);
   const advanced = accumulate(result.state, { ...log.final, tic: 21001, map: 2, leveltime: 1, kills: 1, items: 2, secrets: 1 }, true, id);

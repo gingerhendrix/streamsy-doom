@@ -5,8 +5,8 @@ export const projectionReadPath = (path: string) => /^doom\/v2\/(sessions|batche
 export const binary = "application/octet-stream";
 export const sessionPath = (id: string) => `doom/v2/sessions/${validId(id)}`;
 export const batchPath = (id: string) => `doom/v2/batches/${validId(id)}`;
-export const indexPath = (id: string) => `doom/v2/snapshot-index/${validId(id)}`;
-export const snapshotPath = (id: string, tic: number) => `doom/v2/snapshots/${validId(id)}/${uint32(tic)}`;
+export const indexPath = (id: string) => `doom/v2/server-snapshots/${validId(id)}`;
+export const snapshotPath = (id: string, tic: number) => `doom/v2/server-snapshots/${validId(id)}/${uint32(tic)}`;
 export function validId(id: string) {
   if (!isFamilyId(id)) throw new Error("Invalid v2 session id");
   return id;

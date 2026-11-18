@@ -28,11 +28,12 @@ The harness caps players at 50 (49 sibling children plus parent), chain depth at
 workload time at 13.5 minutes (12 minutes outside cold) and cleanup at one minute. It cancels writers on the
 first failure, waits for in-flight work, and cleans only IDs journaled before creation.
 SIGINT/SIGTERM also run cleanup. A partial create is cleaned even without a lobby row.
-Cleanup removes snapshots/index, manifest, State session row, and finally the frame
+Cleanup removes the manifest, State session row, and finally the frame
 stream, in child-before-parent order. Browser deletion normally retains frames until
-expiry; the harness additionally deletes its own frames. Server-owned scores/wakes
-and replay identity/checkpoint records have no public delete API and remain under the
-existing retention policy. Scores without session metadata are hidden by the UI.
+expiry; the harness additionally deletes its own frames, which lets replay clear
+its snapshot rows. Server-owned scores/wakes and replay identity/checkpoint
+records have no public delete API and retain their existing policy. Scores without
+session metadata are hidden by the UI.
 
 An interrupted cleanup can be resumed from the same journal:
 

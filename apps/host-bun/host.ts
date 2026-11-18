@@ -4,7 +4,10 @@ import { Http } from "@streamsy/core";
 import { CheckpointStore, Projection } from "@streamsy/projection";
 import { allStreams, ReplayWake, Scores } from "../../src/streams/v2";
 import { isFamilyId } from "../../src/streams/ids";
-import { replayStats, replayIdle } from "../../src/projection/stats";
+import { makeReplayStats, replayIdle } from "../../src/projection/stats";
+import { Database } from "bun:sqlite";
+import { SnapshotTable, snapshotTable, type SqlValue } from "../../src/projection/snapshots";
+import { snapshotRoute, snapshotResponse } from "../../src/server/snapshots";
 import { ReplayEngines } from "../../src/projection/engines";
 import { serverEngine } from "./engine";
 import { Protocol } from "@streamsy/core/protocol";
@@ -21,16 +24,22 @@ export const exposedHeaders = [
 ];
 export async function startHost(options: {
   port?: number; hostname?: string; database?: string; staticDirectory?: string; longPollTimeoutMs?: number;
-  wadPath?: string;
+  wadPath?: string; snapshotInterval?: number;
   onRequest?: (request: Request, response: Response) => void;
 } = {}) {
+  const database = new Database(options.database ?? "doom.sqlite", { create: true });
+  const snapshots = snapshotTable({
+    run: (query, values) => { database.query(query).run(...values); },
+    all: <A>(query: string, values: SqlValue[]) => database.query(query).all(...values) as A[],
+  }, true);
+  const replayStats = makeReplayStats({ snapshotInterval: options.snapshotInterval });
   const protocol = BunStorage.layerProtocol({
     client: { filename: options.database ?? "doom.sqlite" }, longPollTimeoutMs: options.longPollTimeoutMs ?? 20_000,
   });
   const storage = CheckpointStore.layer.pipe(Layer.provideMerge(Protocol.bind(protocol, allStreams).pipe(Layer.provideMerge(protocol))));
   let engineFactory: ReturnType<typeof serverEngine> | undefined;
   const engines = Layer.succeed(ReplayEngines, { cache: new Map(), create: async identity => (await (engineFactory ??= serverEngine(options.wadPath)))(identity) });
-  const runtime = ManagedRuntime.make(Layer.merge(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines)));
+  const runtime = ManagedRuntime.make(Layer.merge(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines), Layer.provideMerge(Layer.succeed(SnapshotTable, snapshots))));
   const context = await runtime.context();
   const cors = HttpRouter.cors({ exposedHeaders, maxAge: 0 });
   const v2 = HttpRouter.toWebHandler(Http.routes(allStreams, {
@@ -43,7 +52,10 @@ export async function startHost(options: {
     async fetch(request) {
       const url = new URL(request.url);
       let response: Response;
-      if (url.pathname.startsWith("/__")) response = new Response(null, { status: 404 });
+      const snapshot = snapshotRoute(request);
+      if (snapshot instanceof Response) response = snapshot;
+      else if (snapshot) response = snapshotResponse(request, snapshot, snapshots);
+      else if (url.pathname.startsWith("/__")) response = new Response(null, { status: 404 });
       else if (url.pathname.startsWith("/doom/v2/bootstrap/")) {
         if (request.method !== "POST") response = new Response(null, { status: 405 });
         else {
@@ -78,7 +90,7 @@ export async function startHost(options: {
   });
   return {
     url: server.url.toString(), server,
-    async stop() { await server.stop(true); await v2.dispose(); await runtime.dispose(); },
+    async stop() { await server.stop(true); await v2.dispose(); await runtime.dispose(); database.close(); },
   };
 }
 if (import.meta.main) {

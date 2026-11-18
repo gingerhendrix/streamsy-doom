@@ -20,7 +20,7 @@ export async function prepareRecording(count: number): Promise<Recording> {
     frames.push(engine.step());
   }
   const replay = await (await serverEngine())(engine.identity);
-  const result = replayPages(initialStats(), [encode({ ...engine.identity, formatVersion: 1 }), ...frames], replay, "recording");
+  const result = await replayPages(initialStats(), [encode({ ...engine.identity, formatVersion: 1 }), ...frames], replay, "recording");
   if (!result.state.verified) throw new Error("Fixture did not replay deterministically");
   return { identity: engine.identity, frames, publications: result.rows.map(row => row.tic) };
 }

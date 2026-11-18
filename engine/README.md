@@ -129,10 +129,9 @@ For direct module use, set immutable `module.wadBytes` and write those bytes to
 
 `engine/src/headless.ts` creates replay-only engines from a shared factory. Reuse
 that factory for the isolate: it retains one immutable WAD and one pre-init 16 MiB
-baseline, with one 16 MiB WASM heap per engine. IWAD discovery uses an empty MEMFS
+baseline, with one 16 MiB WASM heap and one reusable 16 MiB post-init baseline per engine. IWAD discovery uses an empty MEMFS
 file; actual reads use the existing positional WAD adapter. There is no second
-MEMFS WAD copy and no per-engine snapshot baseline. `reset(identity)` reuses the
-heap and trusted pre-init baseline; `step(frame)` returns false on RNG drift and
+MEMFS WAD copy. `reset(identity)` reuses the heap and baselines; `step(frame)` returns false on RNG drift and
 throws for malformed commands. Neither operation accepts player snapshots.
 `engine/src/stats.js` defines the shared `_dg_stats()` layout and reader without
 loading either engine adapter. The checkpoint schema uses those same field names.
@@ -146,7 +145,8 @@ The worker-only glue scopes Emscripten environment probes to the Worker despite
 retains the WASM import for Cloudflare and local workerd's `CompiledWasm` loader.
 `apps/host-bun/engine.ts` provides the same adapter with Bun's WASM bytes loader.
 The replay projection uses these adapters to verify recorded inputs without
-trusting browser heap snapshots.
+restoring uploaded heaps. It creates its own snapshots every 21,000 tics and
+stores them in its local SQLite table; cache recovery still replays from zero.
 
 ## Snapshot contract and measured sizes
 
@@ -165,8 +165,12 @@ A baseline is held per instance (16 MiB additional JS memory). Memory growth,
 threads, Asyncify and live WASM stack frames are absent. The same build, WAD and
 settings reconstruct the baseline. WAD reads use immutable JS bytes with absolute
 offsets; no JS filesystem cursor enters snapshots. Never restore untrusted heaps.
-Compression and persistence belong to callers; retain the metadata alongside the
-gzipped delta. Snapshots are build-specific, not portable saves.
+The browser-style `snapshot()` returns a checkpoint for callers to compress. The
+headless adapter’s async `snapshot()` streams the metadata line and XOR delta into
+native gzip using one reusable 64 KiB buffer, then returns compressed bytes. Do
+not step/reset that engine until compression settles. The replay projection owns
+persistence; the browser play loop only records inputs. Snapshots are build-specific,
+not portable saves.
 
 Freedoom Phase 1 0.13.0, E1M1, skill 3, scripted test, same WASM build:
 

@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createEngine, keys } from "../../engine/src/engine.js";
+import { snapshotEntries, snapshotBytes } from "../helpers/snapshots";
 import { startHost, exposedHeaders } from "../../apps/host-bun/host";
 import {
   ProtocolClient, SessionReader, SnapshotStore, Lobby, createSession, forkSession, deleteSession,
@@ -18,7 +19,7 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
   const childId = "a".repeat(32) + "_" + "2".repeat(32);
   const grandchildId = "a".repeat(32) + "_" + "3".repeat(32);
   const requests: { method: string; path: string; status: number; headers: Headers; live: boolean }[] = [];
-  const host = await startHost({ port: 0, database: ":memory:", longPollTimeoutMs: 50,
+  const host = await startHost({ port: 0, database: ":memory:", longPollTimeoutMs: 50, snapshotInterval: 1500,
     onRequest(request, response) {
       const url = new URL(request.url);
       requests.push({ method: request.method, path: url.pathname, status: response.status, headers: request.headers, live: url.searchParams.has("live") });
@@ -31,7 +32,7 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
     const wad = await Bun.file(wadPath).bytes(), wasmBinary = await Bun.file(build + "doom.wasm").bytes();
     const create = () => createEngine(wad, { wasmBinary, skill: 3, episode: 1, map: 1 });
     const player = await create();
-    const writer = await createSession(client, { id: parent, playerName: "Recorder", identity: player.identity, snapshotInterval: 1500 });
+    const writer = await createSession(client, { id: parent, playerName: "Recorder", identity: player.identity });
     const liveReader = new SessionReader(client, parent);
     await liveReader.catchUp();
     const liveFrames: Uint8Array[] = [];
@@ -74,20 +75,20 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
     }
     expect(replay.driftCount).toBe(0);
     const parentStore = new SnapshotStore(client, parent);
-    const entries = await parentStore.entries();
+    const entries = await snapshotEntries(client, parent, [1500, 3000, 4500]);
     expect(entries.map(entry => entry.tic)).toEqual([1500, 3000, 4500]);
     for (const entry of entries) {
       expect(entry.size).toBeLessThan(2_000_000);
       const response = await client.request(snapshotPath(parent, entry.tic), { method: "HEAD" });
-      expect(response.headers.get("Stream-Closed")).toBe("true");
-      expect(response.headers.get("Stream-TTL")).toBe("86400");
+      expect(response.headers.get("Content-Length")).toBe(String(entry.size));
+      expect(response.headers.get("Cache-Control")).toContain("immutable");
     }
     const seekEngine = await create();
     expect(await fresh.seek(seekEngine, 4321)).toEqual({ snapshotTic: 3000, replayed: 1321 });
     expect(seekEngine.hash()).toBe(hashes.get(4321)!);
     const containing = batches.find(batch => batch.startTic > 3000 && batch.endTic - batch.startTic > 30)!;
     const forkTic = containing.startTic + 17;
-    const child = await forkSession(client, parent, forkTic, { id: childId, playerName: "Fork", snapshotInterval: 1500 });
+    const child = await forkSession(client, parent, forkTic, { id: childId, playerName: "Fork" });
     const forkRequest = requests.find(request => request.method === "PUT" && request.path === `/${sessionPath(childId)}`)!;
     expect(forkRequest.status).toBe(201);
     expect(forkRequest.headers.get("Stream-Fork-Offset")).toBe(containing.before);
@@ -95,10 +96,10 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
     const childReader = await new SessionReader(client, childId).catchUp();
     expect(childReader.frames).toEqual(fresh.frames.slice(0, forkTic));
     const childStore = new SnapshotStore(client, childId);
-    expect((await childStore.entries()).map(entry => entry.tic)).toEqual([1500, 3000]);
+    expect((await snapshotEntries(client, childId, [1500, 3000])).map(entry => entry.tic)).toEqual([1500, 3000]);
     for (const entry of await childStore.entries()) {
-      expect(await client.all(snapshotPath(childId, entry.tic))).toEqual(await client.all(snapshotPath(parent, entry.tic)));
-      expect((await client.request(snapshotPath(childId, entry.tic), { method: "HEAD" })).headers.get("Stream-Closed")).toBe("true");
+      expect(await snapshotBytes(client, childId, entry.tic)).toEqual(await snapshotBytes(client, parent, entry.tic));
+      expect((await client.request(snapshotPath(childId, entry.tic), { method: "HEAD" })).headers.get("Content-Length")).toBe(String(entry.size));
     }
     const forkEngine = await create();
     expect(await childReader.seek(forkEngine, forkTic)).toEqual({ snapshotTic: 3000, replayed: forkTic - 3000 });
@@ -123,9 +124,10 @@ test.skipIf(missing.length > 0)(`real WASM (v2): 5000 tics, live tail, snapshot 
     expect(grandEngine.hash()).toBe(comparison.hash());
     await deleteSession(client, grandchildId);
     await deleteSession(client, childId);
-    for (const path of [snapshotPath(childId, 1500), snapshotPath(childId, 3000), indexPath(childId), batchPath(childId)]) {
+    for (const path of [batchPath(childId)]) {
       expect((await fetch(new URL(path, host.url), { method: "HEAD" })).status).toBe(404);
     }
+    expect((await childStore.entries()).map(entry => entry.tic)).toEqual([1500, 3000]); // server rows expire independently
     expect((await client.request(sessionPath(childId), { method: "HEAD" })).status).toBe(200); // TTL policy
     expect((await client.request(snapshotPath(parent, 3000), { method: "HEAD" })).status).toBe(200);
     await expect(new Lobby(client).get(childId)).rejects.toThrow("Session missing");
@@ -162,9 +164,11 @@ test("host: placeholder/static safety, CORS fork preflight and exposed headers, 
     expect(create.status).toBe(201);
     expect(create.headers.get("Access-Control-Allow-Origin")).toBeTruthy();
     for (const name of exposedHeaders) expect(create.headers.get("Access-Control-Expose-Headers")?.toLowerCase()).toContain(name.toLowerCase());
-    const tooBig = await fetch(new URL(snapshotPath("a".repeat(32) + "_" + "4".repeat(32), 1), host.url), { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: new Uint8Array(2_000_001) });
+    const capPath = new URL(batchPath("a".repeat(32) + "_" + "5".repeat(32)), host.url);
+    const envelope = JSON.stringify([{ headerOffset: "" }]).length;
+    const tooBig = await fetch(capPath, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ headerOffset: "x".repeat(2_000_001 - envelope) }]) });
     expect(tooBig.status).toBe(413);
-    const fits = await fetch(new URL(snapshotPath("a".repeat(32) + "_" + "4".repeat(32), 2), host.url), { method: "PUT", headers: { "Content-Type": "application/octet-stream", "Stream-Closed": "true" }, body: new Uint8Array(2_000_000) });
+    const fits = await fetch(capPath, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ headerOffset: "x".repeat(2_000_000 - envelope) }]) });
     expect(fits.status).toBe(201);
   } finally { await host.stop(); }
 });
@@ -197,11 +201,6 @@ test.skipIf(missing.length > 0)("fresh clients: exact boundary, tic zero, inheri
     expect((await new SessionReader(client, partialAgain).catchUp()).frames).toEqual(frames.slice(0, 1));
     const store = new SnapshotStore(client, boundaries);
     expect(await store.entries()).toEqual([]);
-    await store.write({ ...identity, tic: 1, heap: new Uint8Array(64) });
-    expect((await store.entries()).map(entry => entry.tic)).toEqual([1]);
-    await store.write({ ...identity, tic: 2, heap: new Uint8Array(64).fill(2) });
-    expect((await store.entries()).map(entry => entry.tic)).toEqual([1, 2]);
-    expect((await store.load((await store.entries())[1])).heap).toEqual(new Uint8Array(64).fill(2));
     // HTTP catch-up is capped at 1000 stored messages; boundaries must survive
     // aggregation and pagination independently of response chunking.
     const paged = await createSession(client, { id: pagedId, playerName: "Paging", identity });

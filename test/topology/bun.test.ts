@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
 import { startHost } from "../../apps/host-bun/host";
-import { ProtocolClient, createSession, forkSession, familyOf, sessionPath, batchPath, indexPath, snapshotPath, deleteSession, Lobby } from "../../src/streams";
+import { ProtocolClient, createSession, forkSession, familyOf, sessionPath, batchPath, indexPath, snapshotPath, deleteSession, Lobby, SnapshotStore, concat } from "../../src/streams";
+import { testScratch } from "../helpers/scratch";
+import { snapshotEntries } from "../helpers/snapshots";
 import { recording } from "../helpers/recording";
 const { identity, frames } = await recording(350, false);
+const snapshotScratch = await testScratch("bun-snapshots");
 test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mounts", async () => {
-  const host = await startHost({ port: 0, database: ":memory:" });
+  const host = await startHost({ port: 0, database: ":memory:", snapshotInterval: 175 });
   let requests = 0;
   const client = new ProtocolClient(host.url, (input, init) => { requests++; return fetch(input, init); });
   try {
@@ -34,6 +37,11 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
       await Bun.sleep(10);
     }
     expect(rows.at(-1)?.value.tic).toBe(175);
+    await snapshotEntries(client, writer.row.id, [175]);
+    for (const path of [indexPath(writer.row.id), snapshotPath(writer.row.id, 175)]) {
+      for (const method of ["PUT", "POST", "DELETE", "PATCH", "OPTIONS"]) expect((await fetch(new URL(path, host.url), { method })).status).toBe(405);
+      const head = await client.request(path, { method: "HEAD" }); expect((await head.arrayBuffer()).byteLength).toBe(0);
+    }
     const before = requests;
     await expect(forkSession(client, writer.row.id, 10, { id: "f".repeat(32) + "_" + "1".repeat(32), playerName: "Bad" })).rejects.toThrow("Cross-family");
     expect(requests).toBe(before);
@@ -54,7 +62,7 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
   Database.prototype.query = function(this: InstanceType<typeof Database>, sql: string) {
     queries++; return query.call(this, sql);
   } as typeof query;
-  const host = await startHost({ port: 0, database: ":memory:" });
+  const host = await startHost({ port: 0, database: ":memory:", snapshotInterval: 175 });
   try {
     const client = new ProtocolClient(host.url);
     const parent = await createSession(client, { playerName: "Idle", identity });
@@ -76,6 +84,7 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
       if (rows.some(row => row.value.tic === 175)) break;
       await Bun.sleep(10);
     }
+    await snapshotEntries(client, parent.row.id, [175]);
     await Bun.sleep(250);
     expect(queries).toBeGreaterThan(100); // proves that the SQL probe is active
     const began = queries;
@@ -97,3 +106,33 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
     }
   } finally { await host.stop(); Database.prototype.query = query; }
 }, 40000);
+
+
+test("Bun snapshot table persists beside streams, expires rows and clears them when frames are gone", async () => {
+  const { Database } = await import("bun:sqlite");
+  const database = `${snapshotScratch}/host.sqlite`;
+  let host = await startHost({ port: 0, database, snapshotInterval: 175 });
+  let sql: InstanceType<typeof Database> | undefined;
+  try {
+    let client = new ProtocolClient(host.url);
+    const writer = await createSession(client, { playerName: "Persistent snapshots", identity });
+    await writer.append(frames.slice(0, 175));
+    const entries = await snapshotEntries(client, writer.row.id, [175]);
+    const original = await new SnapshotStore(client, writer.row.id).load(entries[0]);
+    await host.stop(); host = await startHost({ port: 0, database, snapshotInterval: 175 }); client = new ProtocolClient(host.url);
+    expect(await new SnapshotStore(client, writer.row.id).entries()).toEqual(entries);
+    expect(await new SnapshotStore(client, writer.row.id).load(entries[0])).toEqual(original);
+    sql = new Database(database);
+    sql.query("UPDATE server_snapshots SET expires_at = 0 WHERE id = ?").run(writer.row.id);
+    expect(await new SnapshotStore(client, writer.row.id).entries()).toEqual([]);
+    expect((await fetch(new URL(snapshotPath(writer.row.id, 175), host.url))).status).toBe(404);
+    await client.append(sessionPath(writer.row.id), concat(frames.slice(175)));
+    await snapshotEntries(client, writer.row.id, [350]);
+    expect(sql.query("SELECT tic FROM server_snapshots WHERE id = ?").all(writer.row.id)).toEqual([{ tic: 350 }]);
+    await deleteSession(client, writer.row.id);
+    expect(await new SnapshotStore(client, writer.row.id).entries()).toHaveLength(1);
+    await client.remove(sessionPath(writer.row.id));
+    await snapshotEntries(client, writer.row.id, []);
+    expect(sql.query("SELECT count(*) AS n FROM server_snapshots WHERE id = ?").get(writer.row.id)).toEqual({ n: 0 });
+  } finally { sql?.close(); await host.stop(); }
+}, 15000);

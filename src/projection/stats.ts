@@ -6,7 +6,9 @@ import { statNames } from "../../engine/src/stats.js";
 import type { EngineStats } from "../../engine/src/engine.js";
 import type { HeadlessEngine } from "../../engine/src/headless";
 import { concat } from "../streams/protocol";
-import { Sessions, Scores, SessionId, StatsRowSchema, type StatsRow } from "../streams/v2";
+import { Sessions, Scores, ReplayWake, SessionId, StatsRowSchema, type StatsRow } from "../streams/v2";
+import { SNAPSHOT_INTERVAL } from "../streams/snapshots";
+import { SnapshotTable } from "./snapshots";
 import { ReplayEngines } from "./engines";
 const Identity = Schema.Struct({ version: Schema.Number, buildId: Schema.String, wadSha256: Schema.String,
   skill: Schema.Number, episode: Schema.Number, map: Schema.Number });
@@ -55,10 +57,10 @@ function visible(row: StatsRow) {
 }
 /** Emit every qualifying tic, including inside a page. Unit boundaries cannot
  * drop intermediate deaths or change the resulting producer row sequence. */
-export function replayPages(state: StatsState, pages: readonly Uint8Array[], engine: HeadlessEngine, id: string) {
+export async function replayPages(state: StatsState, pages: readonly Uint8Array[], engine: HeadlessEngine, id: string) {
   return replayDecoded(state, decodePages(state, pages), engine, id);
 }
-function replayDecoded(state: StatsState, decoded: ReturnType<typeof decodePages>, engine: HeadlessEngine, id: string) {
+async function replayDecoded(state: StatsState, decoded: ReturnType<typeof decodePages>, engine: HeadlessEngine, id: string, snapshots?: { interval: number; write: () => Promise<void> }) {
   let next: StatsState = { ...state, header: decoded.header, tail: decoded.tail };
   const rows: StatsRow[] = [];
   const publish = () => {
@@ -73,6 +75,7 @@ function replayDecoded(state: StatsState, decoded: ReturnType<typeof decodePages
   for (let at = 0; at < decoded.frames.length; at += 9) {
     const valid = engine.step(decoded.frames.subarray(at, at + 9));
     next = accumulate(next, engine.stats(), valid, id); publish();
+    if (snapshots && next.tic % snapshots.interval === 0) await snapshots.write();
   }
   return { state: next, rows };
 }
@@ -101,27 +104,42 @@ function engineAt(id: string, state: StatsState) {
     return rebuilt;
   });
 }
-export const replayStats = Projection.mapAccumBatch({
-  id: "doom-v2-replay-stats", params: { id: SessionId }, inputs: { frames: Sessions }, outputs: { scores: Scores },
-  commit: Commit.producer, state: { schema: StatsState, initial: initialStats },
-  mapAccumBatch: (state, batch, unit) => Effect.gen(function* () {
-    const empty = [] as ReturnType<typeof DurableState.upsert<"stats", StatsRow>>[];
-    if (batch.frames.gone) return [state, { scores: empty }] as const;
-    const decoded = decodePages(state, batch.frames.items);
-    if (!decoded.header || (state.last && !decoded.frames.length))
-      return [{ ...state, tail: decoded.tail }, { scores: empty }] as const;
-    const engine = yield* engineAt(unit.params.id, { ...state, header: decoded.header });
-    const next = replayDecoded(state, decoded, engine, unit.params.id);
-    return [next.state, { scores: next.rows.map(row => DurableState.upsert("stats", row)) }] as const;
-  }),
-});
+export function makeReplayStats({ snapshotInterval = SNAPSHOT_INTERVAL } = {}) {
+  if (!Number.isInteger(snapshotInterval) || snapshotInterval < 1) throw new Error("Invalid snapshot interval");
+  return Projection.mapAccumBatch({
+    id: "doom-v2-replay-stats", params: { id: SessionId }, inputs: { frames: Sessions }, outputs: { scores: Scores },
+    commit: Commit.producer, state: { schema: StatsState, initial: initialStats },
+    mapAccumBatch: (state, batch, unit) => Effect.gen(function* () {
+      const empty = [] as ReturnType<typeof DurableState.upsert<"stats", StatsRow>>[];
+      if (batch.frames.gone) return [state, { scores: empty }] as const;
+      const decoded = decodePages(state, batch.frames.items);
+      if (!decoded.header || (state.last && !decoded.frames.length))
+        return [{ ...state, tail: decoded.tail }, { scores: empty }] as const;
+      const engine = yield* engineAt(unit.params.id, { ...state, header: decoded.header });
+      const table = yield* SnapshotTable;
+      // Only snapshot-producing units need to read the persisted absolute expiry.
+      const crosses = Math.floor((state.tic + decoded.frames.length / 9) / snapshotInterval) > Math.floor(state.tic / snapshotInterval);
+      let expiry = 0;
+      if (crosses) {
+        expiry = Date.parse((yield* (yield* ReplayWake).head(unit.params)).expiresAt ?? "");
+        if (!Number.isFinite(expiry)) throw new Error("Replay wake needs absolute snapshot expiry");
+      }
+      const next = yield* Effect.promise(() => replayDecoded(state, decoded, engine, unit.params.id, {
+        interval: snapshotInterval,
+        write: async () => table.write(unit.params.id, engine.tic, await engine.snapshot(), expiry),
+      }));
+      return [next.state, { scores: next.rows.map(row => DurableState.upsert("stats", row)) }] as const;
+    }),
+  });
+}
+export const replayStats = makeReplayStats();
 export const IDLE_MS = 30_000;
 // Wall clock presence is deliberately outside deterministic producer output.
 // It reads only the settled stats checkpoint, never a player heap or lobby row.
 export const replayIdle = Projection.process({
   id: "doom-v2-replay-idle", params: { id: SessionId }, inputs: { frames: Sessions }, commit: Commit.atLeastOnce,
   process: (batch, unit) => Effect.gen(function* () {
-    if (batch.frames.gone) { (yield* ReplayEngines).cache.delete(unit.params.id); return; }
+    if (batch.frames.gone) { (yield* SnapshotTable).remove(unit.params.id); (yield* ReplayEngines).cache.delete(unit.params.id); return; }
     const now = yield* Clock.currentTimeMillis;
     if (batch.frames.closed || batch.frames.items.some(bytes => bytes.length)) return Projection.wakeAt(now + IDLE_MS);
     if (Option.isNone(unit.due)) return;

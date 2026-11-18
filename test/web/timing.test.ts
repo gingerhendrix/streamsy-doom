@@ -10,19 +10,19 @@ test("fixed step preserves time debt and pause excludes background time", () => 
   expect(tics).toBe(35);
   clock.pause(); clock.advance(5000, step); expect(tics).toBe(35);
 });
-test("queue serializes writes, coalesces backlog, preserves checkpoints and final short batch", async () => {
+test("queue serializes writes, coalesces backlog, preserves the final short batch", async () => {
   let unblock!: () => void, active = 0, max = 0;
-  const batches: number[][] = [], snapshots: number[][] = [];
-  const queue = new FrameQueue<number>(async (frames, checkpoints) => {
-    active++; max = Math.max(max, active); batches.push(frames.map(frame => frame[0])); snapshots.push(checkpoints);
+  const batches: number[][] = [];
+  const queue = new FrameQueue(async (frames) => {
+    active++; max = Math.max(max, active); batches.push(frames.map(frame => frame[0]));
     if (batches.length === 1) await new Promise<void>(resolve => { unblock = resolve; });
     active--;
   });
   queue.push(new Uint8Array([1])); const first = queue.flush();
-  queue.push(new Uint8Array([2]), 2); queue.push(new Uint8Array([3]));
+  queue.push(new Uint8Array([2])); queue.push(new Uint8Array([3]));
   expect(queue.flush()).toBe(first); expect(queue.pending).toBe(3);
   unblock(); await first;
-  expect(max).toBe(1); expect(batches).toEqual([[1], [2, 3]]); expect(snapshots).toEqual([[], [2]]); expect(queue.pending).toBe(0);
+  expect(max).toBe(1); expect(batches).toEqual([[1], [2, 3]]); expect(queue.pending).toBe(0);
   queue.push(new Uint8Array([4])); await queue.flush(); expect(batches.at(-1)).toEqual([4]);
 });
 test("ambiguous failures stop later writes without retry", async () => {
