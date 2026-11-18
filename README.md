@@ -98,10 +98,10 @@ The producer emits each visible-stat change and each 175-tic bucket (five second
 
 Streams keep `maxMessageSize: 2_000_000`; snapshot table writes separately reject gzip BLOBs over 2,000,000 bytes. Both hosts share an origin with their client; Bun also retains its development CORS headers. V2 sessions, manifests and replay wakes use absolute expiry 24 hours after creation, including each fork; reading or appending does not extend that deadline. Snapshot rows use the replay wake stream’s same absolute deadline. Reads ignore expired rows, writes purge expired rows, and a gone frame stream clears the replay’s rows. Lobby/scores keep sliding TTLs; replay identity records remain small durable tombstones, including abandoned bootstraps. Automatic identity/checkpoint garbage collection is not implemented. Recovery after a commit-before-alarm crash is proven on reacquisition, not as an autonomous repair guarantee.
 
-For a future **approved** test deployment, first create the public source repository and configure its corresponding-source link, then build:
+For a future **approved** test deployment, build with the client footer's corresponding-source link pointing at the public repository:
 
 ```sh
-VITE_SOURCE_URL=https://github.com/YOUR-ACCOUNT/streamsy-doom bun run build:cf
+VITE_SOURCE_URL=https://github.com/gingerhendrix/streamsy-doom bun run build:cf
 # Only after Gareth explicitly approves deployment:
 bun run deploy:cf
 # Only after Gareth explicitly approves destruction:
@@ -140,4 +140,4 @@ This repository is **GPL-2.0-or-later**, including the client, hosts and engine 
 
 Freedoom is separate game data under **BSD-3-Clause**. Default builds carry its original COPYING and CREDITS files in `/wad/`, referenced by the manifest. No WAD, generated WASM/JS, or WAD parts are committed. Do not redistribute a proprietary IWAD without permission.
 
-Before distributing the compiled GPL engine/client publicly, provide complete corresponding source under GPL, including these build scripts and modifications. Create the public repository first and set `VITE_SOURCE_URL` when building to point the client footer to the source for the deployed version. The default footer marks the repository URL pending; it does not satisfy the public deployment source requirement. Keep the distributed data's notices alongside its assets.
+Before distributing the compiled GPL engine/client publicly, provide complete corresponding source under GPL, including these build scripts and modifications. The public repository is https://github.com/gingerhendrix/streamsy-doom; set `VITE_SOURCE_URL` to it when building to point the client footer to the source for the deployed version. The default footer marks the repository URL pending; it does not satisfy the public deployment source requirement. Keep the distributed data's notices alongside its assets.
