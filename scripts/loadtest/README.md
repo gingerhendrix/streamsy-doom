@@ -15,7 +15,7 @@ Run workloads sequentially. The families ramp is four invocations with `--player
 | siblings | `--players 20 --seconds 30` | Parent seed of 12 tics; every sibling forks inside that batch at tic 7, then plays concurrently |
 | lineage | `--depth 25 --seconds 5` | Seed, then fork each previous tail and play five more tics; read and locally replay the deepest child |
 | cold | `--histories 175,21000 --idle-seconds 180` | Real-time history upload; idle, then play 175 tics and wait for qualifying score |
-| lobby | `--players 50 --seconds 30 --followers 3` | Independent players plus followers of both metadata and scores |
+| lobby | `--players 50 --seconds 30 --followers 3` | Independent players plus followers of each Game plus the capped Entries stream |
 
 Normal playback runs at 35 tics/s, starting with five-tic batches and coalescing pending
 tics when writes are slow, like the browser queue. Cold history setup and its 175-tic
@@ -31,9 +31,8 @@ SIGINT/SIGTERM also run cleanup. A partial create is cleaned even without a lobb
 Cleanup removes the manifest, State session row, and finally the frame
 stream, in child-before-parent order. Browser deletion normally retains frames until
 expiry; the harness additionally deletes its own frames, which lets replay clear
-its snapshot rows. Server-owned scores/wakes and replay identity/checkpoint
-records have no public delete API and retain their existing policy. Scores without
-session metadata are hidden by the UI.
+its snapshot rows. Server-owned Game/wakes and replay identity/checkpoint
+records have no public delete API and retain their existing policy. Session deletes asynchronously remove the derived Entries row.
 
 An interrupted cleanup can be resumed from the same journal:
 
@@ -41,7 +40,7 @@ An interrupted cleanup can be resumed from the same journal:
 bun run loadtest -- --target https://streamsy-doom-test.gingerhendrix.workers.dev --cleanup /path/to/scratch/families-10.json
 ```
 
-Score follows use the browser `followJson`: HTTP catch-up, `streamsy-live.v1`
+Each synthetic player follows its own Game (one socket per player with the default one follower). A separate Entries follower observes the lobby. Follows use the browser `followJson`: HTTP catch-up, `streamsy-live.v1`
 WebSockets, then long-poll fallback (`--long-poll` forces it). Batches are applied
 only at socket control frames. The harness deduplicates catch-up/reconnect deliveries.
 Additional followers measure signed delivery difference relative to follower zero;
@@ -52,8 +51,7 @@ that tic, excluding inherited rows. Only sparse qualifying publications are samp
 unpublished tics are not counted as lost deliveries. A frame commit occurs between
 request send and acknowledgement. Those endpoints bound commit-to-client-observation
 latency; neither individual alarm hop nor exact server commit time is exposed publicly.
-Reported send-to-score includes the POST network leg, both alarms, replay, lobby write,
-and score delivery. Append RTT and append-plus-manifest time are separate. Percentiles
+Reported `hudLatencyMs` (also retained as `sendToScoreMs`) includes the POST network leg, alarms, replay, local Game write and HUD delivery. `lobbyDeliveryMs` pairs summary receipt with its source tic. `lobbyStalenessTics` samples the last received Entries tic after each frame/manifest append; `lobbyStalenessMs` is its age since sending that tic’s batch when known. Staleness includes the intentional 175-tic (five-second) cap and should be assessed separately from HUD latency. Append RTT and append-plus-manifest time are separate. Percentiles
 use nearest rank. Score rows/s counts unique observed State rows, not sink POSTs or SQL
 writes. Cold results include input append and score delivery, not isolated replay CPU.
 

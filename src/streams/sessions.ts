@@ -39,7 +39,7 @@ export class SessionWriter {
     }
     return this.append(frames);
   }
-  async end() { this.row = { ...this.row, ended: true }; await new Lobby(this.client).put(this.row); }
+  async end() { await this.client.request(`doom/v2/end/${this.row.id}`, { method: "POST" }); this.row = { ...this.row, ended: true }; }
 }
 export async function createSession(client: ProtocolClient, options: {
   id?: string; playerName: string; identity: Identity;
@@ -47,14 +47,12 @@ export async function createSession(client: ProtocolClient, options: {
   const id = options.id ?? newSessionId();
   familyOf(id);
   const header: SessionHeader = { ...options.identity, formatVersion: 1, forkedFrom: null, forkTic: null };
-  const lobby = new Lobby(client); await lobby.init();
-  await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
+  const responseRow = await client.request(`doom/v2/bootstrap/${id}`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ playerName: options.playerName, ...options.identity, forkedFrom: null, forkTic: null }) });
+  const row = await responseRow.json() as SessionMetadata;
   const response = await client.create(sessionPath(id), encode(header));
   const offset = offsetOf(response);
   await client.create(batchPath(id), JSON.stringify([{ headerOffset: offset }]), "application/json");
-  const row: SessionMetadata = { id, playerName: options.playerName, skill: header.skill, episode: header.episode, map: header.map,
-    createdAt: new Date().toISOString(), ended: false, forkedFrom: null, forkTic: null };
-  await lobby.put(row);
   return new SessionWriter(client, row, offset);
 }
 export class SessionReader {
@@ -126,7 +124,9 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   const boundary = tic === 0 ? headerOffset : batches.find(batch => batch.endTic === tic)?.after;
   const offset = inside?.before ?? boundary;
   if (!offset) throw new Error("Missing fork batch boundary");
-  await client.request(`doom/v2/bootstrap/${id}`, { method: "POST" });
+  const responseRow = await client.request(`doom/v2/bootstrap/${id}`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...parent, playerName: options.playerName, forkedFrom: parentId, forkTic: tic }) });
+  const row = await responseRow.json() as SessionMetadata;
   const headers: Record<string, string> = { "Stream-Forked-From": `/${sessionPath(parentId)}`, "Stream-Fork-Offset": offset };
   if (inside) headers["Stream-Fork-Sub-Offset"] = String((tic - inside.startTic) * 9);
   const response = await client.create(sessionPath(id), "", binary, 43200, headers);
@@ -137,13 +137,10 @@ export async function forkSession(client: ProtocolClient, parentId: string, tic:
   await client.create(batchPath(id), JSON.stringify([{ headerOffset }]), "application/json");
   for (let i = 0; i < childBatches.length; i += 1000)
     await client.append(batchPath(id), JSON.stringify(childBatches.slice(i, i + 1000)), "application/json");
-  const row: SessionMetadata = { ...parent, id, playerName: options.playerName, ended: false,
-    createdAt: new Date().toISOString(), forkedFrom: parentId, forkTic: tic };
-  await lobby.put(row);
   return new SessionWriter(client, row, childOffset);
 }
 export async function deleteSession(client: ProtocolClient, id: string) {
-  const lobby = new Lobby(client), row = await lobby.get(id);
+  await new Lobby(client).get(id);
   await client.remove(batchPath(id));
-  await lobby.delete(row);
+  await client.request(`doom/v2/delete/${id}`, { method: "POST" });
 }

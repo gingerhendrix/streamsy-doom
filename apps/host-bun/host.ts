@@ -2,7 +2,9 @@
 import { absoluteExpiry } from "../../src/streams/protocol";
 import { Http } from "@streamsy/core";
 import { CheckpointStore, Projection } from "@streamsy/projection";
-import { allStreams, ReplayWake, Scores } from "../../src/streams/v2";
+import { allStreams, ReplayWake, Game, Entries } from "../../src/streams/v2";
+import { bootstrapSession, changeSession, sessionInput } from "../../src/server/session";
+import { lobbyEntry } from "../../src/projection/lobby-entry";
 import { isFamilyId } from "../../src/streams/ids";
 import { makeReplayStats, replayIdle } from "../../src/projection/stats";
 import { Database } from "bun:sqlite";
@@ -38,15 +40,16 @@ export async function startHost(options: {
   });
   const storage = CheckpointStore.layer.pipe(Layer.provideMerge(Protocol.bind(protocol, allStreams).pipe(Layer.provideMerge(protocol))));
   let engineFactory: ReturnType<typeof serverEngine> | undefined;
-  const engines = Layer.succeed(ReplayEngines, { cache: new Map(), create: async identity => (await (engineFactory ??= serverEngine(options.wadPath)))(identity) });
-  const runtime = ManagedRuntime.make(Layer.merge(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines), Layer.provideMerge(Layer.succeed(SnapshotTable, snapshots))));
+  const engines = Layer.succeed(ReplayEngines, { cache: new Map(), live: new Set<string>(), create: async identity => (await (engineFactory ??= serverEngine(options.wadPath)))(identity) });
+  const runtime = ManagedRuntime.make(Layer.mergeAll(Projection.attach(replayStats, { durable: true }), Projection.attach(replayIdle, { durable: true }), Projection.attach(lobbyEntry, { durable: true })).pipe(Layer.provideMerge(storage), Layer.provideMerge(engines), Layer.provideMerge(Layer.succeed(SnapshotTable, snapshots))));
   const context = await runtime.context();
   const cors = HttpRouter.cors({ exposedHeaders, maxAge: 0 });
   const v2 = HttpRouter.toWebHandler(Http.routes(allStreams, {
     prefix: "/", maxMessageSize: 2_000_000,
-    access: stream => stream === Scores || stream === ReplayWake ? "read" : "full",
+    access: stream => stream === Entries || stream === Game || stream === ReplayWake ? "read" : "full",
   }).pipe(Layer.provide(cors), Layer.provideMerge(Layer.succeedContext(context))), { disableLogger: true });
   const directory = await realpath(options.staticDirectory ?? fileURLToPath(new URL("./public", import.meta.url)));
+  let sessionQueue: Promise<unknown> = Promise.resolve();
   const server = Bun.serve({
     port: options.port ?? 3000, hostname: options.hostname ?? "127.0.0.1", idleTimeout: 0,
     async fetch(request) {
@@ -62,13 +65,30 @@ export async function startHost(options: {
           const id = url.pathname.slice("/doom/v2/bootstrap/".length);
           if (!isFamilyId(id)) response = new Response("Invalid v2 session id", { status: 400 });
           else {
-            await runtime.runPromise(Effect.gen(function* () {
-              yield* (yield* Scores).create({}, { ttlSeconds: 43200 });
-              const wake = yield* ReplayWake;
+            let input: ReturnType<typeof sessionInput>;
+            try { input = sessionInput(id, await request.json()); }
+            catch (error) { return new Response(String(error), { status: 400 }); }
+            const work = sessionQueue.then(() => runtime.runPromise(Effect.gen(function* () {
+              yield* (yield* Entries).create({}, { ttlSeconds: 43200 });
+              const wake = yield* ReplayWake, game = yield* Game;
               yield* wake.head({ id }).pipe(Effect.catchTag("StreamNotFound", () => wake.create({ id }, { expiresAt: absoluteExpiry() })));
-            }));
-            response = new Response(null, { status: 204 });
+              const expiresAt = (yield* wake.head({ id })).expiresAt!;
+              yield* game.head({ id }).pipe(Effect.catchTag("StreamNotFound", () => game.create({ id }, { expiresAt })));
+              return yield* bootstrapSession(id, input);
+            })));
+            sessionQueue = work.catch(() => {});
+            response = Response.json(await work);
           }
+        }
+      }
+      else if (/^\/doom\/v2\/(end|delete)\//.test(url.pathname)) {
+        const [, action, id] = url.pathname.match(/^\/doom\/v2\/(end|delete)\/([^/]+)$/) ?? [];
+        if (!isFamilyId(id ?? "")) response = new Response(null, { status: 400 });
+        else if (request.method !== "POST") response = new Response(null, { status: 405 });
+        else {
+          const work = sessionQueue.then(() => runtime.runPromise(changeSession(id, action as "end" | "delete").pipe(Effect.catchTag("StreamNotFound", () => Effect.succeed(false)))));
+          sessionQueue = work.catch(() => {});
+          response = new Response(null, { status: await work ? 204 : 404 });
         }
       }
       else if (url.pathname.startsWith("/doom/v2/")) response = await v2.handler(request);

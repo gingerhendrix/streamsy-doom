@@ -35,7 +35,7 @@ export async function followJson<T>(client: ProtocolClient, path: string, option
       let batch: Awaited<ReturnType<ProtocolClient["read"]>>;
       try { batch = await client.read(path, offset, live, signal, cursor); }
       catch (error) {
-        // Scores are created by trusted bootstrap, never by a browser PUT.
+        // State streams are created by trusted bootstrap, never by a browser PUT.
         if (error instanceof ProtocolError && error.status === 404) { await retryDelay(signal); continue; }
         throw error;
       }

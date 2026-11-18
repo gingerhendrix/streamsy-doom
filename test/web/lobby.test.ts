@@ -37,7 +37,7 @@ test("Bun browser fallback receives server scores; v2 lifecycle writes metadata 
     const state = new StateRows<StatsRow>("stats");
     let received!: () => void;
     const updated = new Promise<void>(resolve => { received = resolve; });
-    follow = followJson<StateEvent<StatsRow>>(client, "doom/v2/scores", { signal: abort.signal,
+    follow = followJson<StateEvent<StatsRow>>(client, `doom/v2/games/${writer.row.id}`, { signal: abort.signal,
       onTransport: mode => modes.push(mode), onBatch: events => {
         state.apply(events);
         if (state.rows.get(writer.row.id)?.tic === 175) received();
@@ -53,7 +53,7 @@ test("Bun browser fallback receives server scores; v2 lifecycle writes metadata 
     expect(state.rows.get(writer.row.id)).toMatchObject({ verified: true, tic: 175 });
     const child = await forkSession(client, writer.row.id, 10, { playerName: "Child" });
     await writer.end();
-    const events = await client.json<StateEvent<SessionMetadata>>("doom/v2/lobby");
+    const events = (await client.json<StateEvent<SessionMetadata>>(`doom/v2/games/${writer.row.id}`)).filter(e => e.type === "session");
     for (const event of events) {
       expect(event.type).toBe("session");
       expect(event.value).not.toHaveProperty("tickCount");
@@ -61,7 +61,7 @@ test("Bun browser fallback receives server scores; v2 lifecycle writes metadata 
     }
     const sessions = new StateRows<SessionMetadata>("session"); sessions.apply(events);
     expect(sessions.rows.get(writer.row.id)?.ended).toBe(true);
-    expect(sessions.rows.get(child.row.id)?.forkTic).toBe(10);
+    expect((await new Lobby(client).get(child.row.id)).forkTic).toBe(10);
     expect(writer.tic).toBe(175);
     expect(child.tic).toBe(10);
     await child.append(frames.slice(10, 20));
@@ -73,12 +73,12 @@ test("Bun browser fallback receives server scores; v2 lifecycle writes metadata 
     expect(await new Lobby(client).get(grandchild.row.id)).not.toHaveProperty("tickCount");
     expect(await new Lobby(client).get(grandchild.row.id)).not.toHaveProperty("status");
     await deleteSession(client, child.row.id);
-    const deleted = await client.json<StateEvent<SessionMetadata>>("doom/v2/lobby");
+    const deleted = await client.json<StateEvent<SessionMetadata>>(`doom/v2/games/${child.row.id}`);
     expect(deleted.at(-1)).toMatchObject({ type: "session", key: child.row.id, headers: { operation: "delete" } });
     sessions.apply(deleted);
     expect(sessions.rows.has(child.row.id)).toBe(false);
     await expect(new Lobby(client).get(child.row.id)).rejects.toThrow("Session missing");
-    await expect(client.append("doom/v2/scores", JSON.stringify([{ type: "stats", key: writer.row.id, value: { kills: 999 }, headers: { operation: "upsert" } }]), "application/json")).rejects.toMatchObject({ status: 405 });
+    await expect(client.append("doom/v2/entries", JSON.stringify([{ type: "stats", key: writer.row.id, value: { kills: 999 }, headers: { operation: "upsert" } }]), "application/json")).rejects.toMatchObject({ status: 405 });
   } finally { abort.abort(); await follow; await host.stop(); }
 }, 15000);
 
@@ -91,7 +91,7 @@ test("broken socket resumes at its last control offset and never applies an unco
       "Stream-Next-Offset": first ? "opaque/+one==" : "unrelated:two", "Stream-Up-To-Date": "true",
     } });
   });
-  await followJson<number>(client, "doom/v2/scores", { signal: abort.signal,
+  await followJson<number>(client, "doom/v2/entries", { signal: abort.signal,
     onBatch: events => { delivered.push(events); if (events.includes(2)) abort.abort(); },
     socket: url => {
       expect(new URL(url).searchParams.get("offset")).toBe("opaque/+one==");

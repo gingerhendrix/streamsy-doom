@@ -24,7 +24,7 @@ if (values.cleanup) {
   const deadline = AbortSignal.timeout(60000);
   const client = new ProtocolClient(target, (input, init) => fetch(input, { ...init, signal: AbortSignal.any([deadline, AbortSignal.timeout(15000)]) }));
   const rows = await new Lobby(client).rows();
-  if (rows.some(row => result.ids.includes(row.id) && !row.playerName.startsWith(result.run + "-"))) throw new Error("Journal contains a session owned by another run");
+  if (rows.some(row => result.ids.includes(row.id) && !row.playerName.startsWith(result.run.slice(0, 32) + "-"))) throw new Error("Journal contains a session owned by another run");
   await cleanup(client, result.ids, result.cleaned);
   result.cleanupResumedAt = new Date().toISOString(); result.summary = summarize(result);
   await Bun.write(values.cleanup, JSON.stringify(result, null, 2) + "\n");

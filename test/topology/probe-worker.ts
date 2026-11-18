@@ -36,14 +36,16 @@ export class DoomGames extends Games {
   }
 }
 export class DoomReplay extends Replay {
+  private steps = 0;
   private readonly queries: () => number;
   constructor(private readonly probeState: DurableObjectState, env: Env) {
     const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
     const create = this.engines.create;
     this.engines.create = async identity => {
-      const engine = await create(identity), snapshot = engine.snapshot;
+      const engine = await create(identity), snapshot = engine.snapshot, step = engine.step.bind(engine);
+      engine.step = frame => { this.steps++; return step(frame); };
       engine.snapshot = async () => {
-        const began = performance.now(), bytes = await snapshot();
+        const began = performance.now(), bytes = await this.probeState.storage.get("test-oversize") ? new Uint8Array(2000001) : await snapshot();
         await this.probeState.storage.put("test-snapshot-measurement", { tic: engine.tic, bytes: bytes.length,
           compressionMs: performance.now() - began, isolateMemoryApiAvailable: "memory" in performance,
           inferredPostInitBaselineBytes: 16777216, inferredXorChunkBytes: 65536 });
@@ -57,12 +59,19 @@ export class DoomReplay extends Replay {
     await super.alarm();
   }
   override async fetch(request: Request) {
+    if (new URL(request.url).pathname === "/__test/oversize") {
+      await this.probeState.storage.put("test-oversize", true); return new Response(null, { status: 204 });
+    }
+    if (new URL(request.url).pathname === "/__test/expire-game") {
+      this.probeState.storage.sql.exec("UPDATE streamsy_streams SET expires_at_ms = 0, expires_at = '1970-01-01T00:00:00.000Z' WHERE stream_id LIKE 'doom/v2/games/%'");
+      await this.probeState.storage.setAlarm(Date.now()); return new Response(null, { status: 204 });
+    }
     if (new URL(request.url).pathname === "/__test/expire-snapshots") {
       this.probeState.storage.sql.exec("UPDATE server_snapshots SET expires_at = 0"); return new Response(null, { status: 204 });
     }
     if (new URL(request.url).pathname === "/__test/snapshots") return Response.json([...this.probeState.storage.sql.exec("SELECT tic,size,expires_at FROM server_snapshots ORDER BY tic")]);
     if (new URL(request.url).pathname === "/__test/evict") { this.engines.cache.clear(); return new Response(null, { status: 204 }); }
-    if (new URL(request.url).pathname === "/__test/probe") return Response.json({ queries: this.queries(), snapshot: await this.probeState.storage.get("test-snapshot-measurement"), alarm: await this.probeState.storage.get("test-alarm"), identity: await this.probeState.storage.get("doom-v2-session-id"), engines: [...this.engines.cache.values()].map(engine => engine.stats()), armed: await this.probeState.storage.getAlarm() });
+    if (new URL(request.url).pathname === "/__test/probe") return Response.json({ queries: this.queries(), steps: this.steps, snapshot: await this.probeState.storage.get("test-snapshot-measurement"), alarm: await this.probeState.storage.get("test-alarm"), identity: await this.probeState.storage.get("doom-v2-session-id"), engines: [...this.engines.cache.values()].map(engine => engine.stats()), armed: await this.probeState.storage.getAlarm() });
     return super.fetch(request);
   }
 }
@@ -76,12 +85,12 @@ export class DoomLobby extends Lobby {
     if (path === "/__test/fail-score-response") { await this.probeState.storage.put("test-fail-score", true); return new Response(null, { status: 204 }); }
     if (path === "/__test/fail-init") { await this.probeState.storage.put("test-fail-init", true); return new Response(null, { status: 204 }); }
     if (path === "/__test/probe") return Response.json({ queries: this.queries(), scoreAt: await this.probeState.storage.get("test-score-at"), scorePosts: await this.probeState.storage.get("test-score-posts") });
-    if (path === "/__init-scores" && await this.probeState.storage.get("test-fail-init")) {
+    if (path === "/__init-lobby" && await this.probeState.storage.get("test-fail-init")) {
       await this.probeState.storage.delete("test-fail-init");
       return new Response("Injected sink initialization failure", { status: 503 });
     }
     const response = await super.fetch(request);
-    if (path.startsWith("/__scores/") && request.method === "POST" && response.ok) {
+    if (path.startsWith("/__entries/") && request.method === "POST" && response.ok) {
       await this.probeState.storage.put("test-score-at", Date.now());
       await this.probeState.storage.put("test-score-posts", (await this.probeState.storage.get<number>("test-score-posts") ?? 0) + 1);
       if (await this.probeState.storage.get("test-fail-score")) {

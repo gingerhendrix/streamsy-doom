@@ -11,7 +11,7 @@ export class StateRows<T extends object> {
   readonly rows = new Map<string, T>();
   private snapshot?: Set<string>;
   constructor(readonly collection: string) {}
-  apply(events: StateEvent<T>[]) {
+  apply(events: readonly StateEvent<T>[]) {
     for (const event of events) {
       const { operation, control } = event.headers;
       if (control === "reset") { this.rows.clear(); this.snapshot = undefined; }

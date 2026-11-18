@@ -58,7 +58,15 @@ test("loadtest scenarios run against real workerd with engine replay, socket fal
       expect(result.failure).toBeUndefined(); expect(result.outcome).toBe("passed");
       expect(result.cleaned).toHaveLength(result.ids.length);
       expect(result.observations.some(r => r.tic > 0 && r.verified)).toBe(true);
-      expect((await new Lobby(client).rows()).filter(r => result.ids.includes(r.id))).toHaveLength(0);
+      expect(result.requests.some(r => r.path.startsWith("/doom/v2/games/"))).toBe(true);
+      expect(result.requests.some(r => r.path === "/doom/v2/scores" || r.path === "/doom/v2/lobby")).toBe(false);
+      expect(result.lobbyObservations.length).toBeGreaterThan(0);
+      for (let n = 0; n < 100; n++) {
+        const rows = (await new Lobby(client).rows()).filter(r => result.ids.includes(r.id));
+        if (!rows.length) break;
+        if (n === 99) throw new Error("Derived lobby delete did not arrive");
+        await Bun.sleep(20);
+      }
       for (const id of result.ids) {
         for (const path of [sessionPath(id), batchPath(id)]) expect((await fetch(new URL(path, target), { method: "HEAD" })).status).toBe(404);
         // The read-only list still exists; gone frames clear any server rows.

@@ -6,7 +6,7 @@ import { statNames } from "../../engine/src/stats.js";
 import type { EngineStats } from "../../engine/src/engine.js";
 import type { HeadlessEngine } from "../../engine/src/headless";
 import { concat } from "../streams/protocol";
-import { Sessions, Scores, ReplayWake, SessionId, StatsRowSchema, type StatsRow } from "../streams/v2";
+import { Sessions, Game, ReplayWake, SessionId, StatsRowSchema, type StatsRow } from "../streams/v2";
 import { SNAPSHOT_INTERVAL } from "../streams/snapshots";
 import { SnapshotTable } from "./snapshots";
 import { ReplayEngines } from "./engines";
@@ -44,15 +44,15 @@ export function accumulate(state: StatsState, stats: EngineStats, verified: bool
   const delta = (key: "kills" | "items" | "secrets") => reset || stats[key] < last![key] ? stats[key] : stats[key] - last![key];
   const kills = state.kills + delta("kills"), items = state.items + delta("items"), secrets = state.secrets + delta("secrets");
   const deaths = state.deaths + Number(last?.playerstate === 0 && stats.playerstate === 1);
-  const row: StatsRow = { id, tic: stats.tic, updatedTic: stats.tic, health: stats.health, armor: stats.armor,
+  const row: StatsRow = { id, tic: stats.tic, health: stats.health, armor: stats.armor,
     kills, deaths, items, secrets, levelKills: stats.kills, levelItems: stats.items, levelSecrets: stats.secrets,
     levelTotalKills: stats.totalKills, levelTotalItems: stats.totalItems, levelTotalSecrets: stats.totalSecrets,
     episode: stats.episode, map: stats.map, weapon: stats.weapon, ammo: stats.ammo,
-    alive: stats.playerstate === 0 && stats.health > 0, verified: state.verified && verified, live: true };
+    alive: stats.playerstate === 0 && stats.health > 0, verified: state.verified && verified };
   return { ...state, tic: stats.tic, last: stats, row, kills, deaths, items, secrets, verified: row.verified };
 }
 function visible(row: StatsRow) {
-  const { tic, updatedTic, ...fields } = row;
+  const { tic, ...fields } = row;
   return JSON.stringify([fields, Math.floor(tic / 175)]);
 }
 /** Emit every qualifying tic, including inside a page. Unit boundaries cannot
@@ -107,14 +107,14 @@ function engineAt(id: string, state: StatsState) {
 export function makeReplayStats({ snapshotInterval = SNAPSHOT_INTERVAL } = {}) {
   if (!Number.isInteger(snapshotInterval) || snapshotInterval < 1) throw new Error("Invalid snapshot interval");
   return Projection.mapAccumBatch({
-    id: "doom-v2-replay-stats", params: { id: SessionId }, inputs: { frames: Sessions }, outputs: { scores: Scores },
+    id: "doom-v2-replay", params: { id: SessionId }, inputs: { frames: Sessions }, outputs: { game: Game },
     commit: Commit.producer, state: { schema: StatsState, initial: initialStats },
     mapAccumBatch: (state, batch, unit) => Effect.gen(function* () {
       const empty = [] as ReturnType<typeof DurableState.upsert<"stats", StatsRow>>[];
-      if (batch.frames.gone) return [state, { scores: empty }] as const;
+      if (batch.frames.gone) return [state, { game: empty }] as const;
       const decoded = decodePages(state, batch.frames.items);
       if (!decoded.header || (state.last && !decoded.frames.length))
-        return [{ ...state, tail: decoded.tail }, { scores: empty }] as const;
+        return [{ ...state, tail: decoded.tail }, { game: empty }] as const;
       const engine = yield* engineAt(unit.params.id, { ...state, header: decoded.header });
       const table = yield* SnapshotTable;
       // Only snapshot-producing units need to read the persisted absolute expiry.
@@ -126,9 +126,12 @@ export function makeReplayStats({ snapshotInterval = SNAPSHOT_INTERVAL } = {}) {
       }
       const next = yield* Effect.promise(() => replayDecoded(state, decoded, engine, unit.params.id, {
         interval: snapshotInterval,
-        write: async () => table.write(unit.params.id, engine.tic, await engine.snapshot(), expiry),
+        write: async () => {
+          try { table.write(unit.params.id, engine.tic, await engine.snapshot(), expiry); }
+          catch (error) { if (!(error instanceof Error && error.message.startsWith("Snapshot too large:"))) throw error; }
+        },
       }));
-      return [next.state, { scores: next.rows.map(row => DurableState.upsert("stats", row)) }] as const;
+      return [next.state, { game: next.rows.map(row => DurableState.upsert("stats", row)) }] as const;
     }),
   });
 }
@@ -139,9 +142,16 @@ export const IDLE_MS = 30_000;
 export const replayIdle = Projection.process({
   id: "doom-v2-replay-idle", params: { id: SessionId }, inputs: { frames: Sessions }, commit: Commit.atLeastOnce,
   process: (batch, unit) => Effect.gen(function* () {
-    if (batch.frames.gone) { (yield* SnapshotTable).remove(unit.params.id); (yield* ReplayEngines).cache.delete(unit.params.id); return; }
+    if (batch.frames.gone) { (yield* SnapshotTable).remove(unit.params.id); (yield* ReplayEngines).cache.delete(unit.params.id); (yield* ReplayEngines).live.delete(unit.params.id); return; }
     const now = yield* Clock.currentTimeMillis;
-    if (batch.frames.closed || batch.frames.items.some(bytes => bytes.length)) return Projection.wakeAt(now + IDLE_MS);
+    const engines = yield* ReplayEngines;
+    if (batch.frames.closed || batch.frames.items.some(bytes => bytes.length)) {
+      if (!engines.live.has(unit.params.id)) {
+        yield* (yield* Game).append(unit.params, [{ type: "presence", key: unit.params.id, value: { id: unit.params.id, live: true }, headers: { operation: "upsert" } }]);
+        engines.live.add(unit.params.id);
+      }
+      return Projection.wakeAt(now + IDLE_MS);
+    }
     if (Option.isNone(unit.due)) return;
     const store = yield* CheckpointStore;
     const stats = Option.getOrUndefined((yield* store.load({ id: replayStats.id, version: replayStats.version, generation: replayStats.generation, params: unit.params })).record);
@@ -149,10 +159,8 @@ export const replayIdle = Projection.process({
     // A failed/pending stats delivery is transport lag, not a drift verdict.
     if (!stats || stats.pending || stats.inputs.frames !== idle?.inputs.frames)
       return Projection.wakeAt(now + 1000);
-    if (stats.state) {
-      const state = Schema.decodeUnknownSync(StatsState)(JSON.parse(stats.state));
-      if (state.row) yield* (yield* Scores).append({}, [{ type: "stats", key: unit.params.id, value: { ...state.row, live: false }, headers: { operation: "upsert" } }]);
-    }
+    yield* (yield* Game).append(unit.params, [{ type: "presence", key: unit.params.id, value: { id: unit.params.id, live: false }, headers: { operation: "upsert" } }]);
+    engines.live.delete(unit.params.id);
     (yield* ReplayEngines).cache.delete(unit.params.id);
   }),
 });

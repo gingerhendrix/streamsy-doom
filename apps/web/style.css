@@ -22,7 +22,7 @@ a { color: var(--amber); } a:hover { color: #fff0b0; }
 /* Title: chunky red bitmap-style lettering with a hard drop shadow. */
 header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 22px; padding-bottom: 10px;
   border-bottom: 4px solid; border-image: linear-gradient(90deg, transparent, var(--blood) 15%, var(--flame) 50%, var(--blood) 85%, transparent) 1; }
-h1, h2, legend, th, button, kbd, label, .metrics, .score-hud, .num, #count { font-family: var(--pixel); font-weight: 400; }
+h1, h2, legend, th, button, kbd, label, .metrics, .hud, .num, #count { font-family: var(--pixel); font-weight: 400; }
 h1 { margin: 0; font-size: 72px; line-height: .9; text-transform: uppercase; letter-spacing: .02em;
   color: #9d958c; background: linear-gradient(#e9e3db 0 30%, #8f877e 55%, #4a4440); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
   filter: drop-shadow(4px 4px 0 #000); }
@@ -102,11 +102,16 @@ canvas:focus-visible, canvas:focus { box-shadow: 0 0 0 3px var(--focus); }
     radial-gradient(ellipse 85% 80% at 50% 50%, transparent 62%, rgba(0, 0, 0, .5) 100%); }
 
 /* Status-bar strips with amber HUD numerals. */
-.metrics, .score-hud { margin: 12px 0 0; padding: 8px 14px 6px; font-size: 22px; line-height: 1.15; letter-spacing: .04em; font-variant-numeric: tabular-nums; text-shadow: 2px 2px 0 #000;
+.metrics, .hud { margin: 12px 0 0; padding: 8px 14px 6px; font-size: 22px; line-height: 1.15; letter-spacing: .04em; font-variant-numeric: tabular-nums; text-shadow: 2px 2px 0 #000;
   background: var(--grit), linear-gradient(#3e3a36, #2a2724); border: 3px solid; border-color: var(--metal-lo) var(--metal-hi) var(--metal-hi) var(--metal-lo); }
 .metrics { display: flex; flex-wrap: wrap; gap: 25px; color: var(--amber); min-height: 2.1em; }
-.score-hud { color: var(--flame); }
-.score-hud:empty { display: none; }
+.hud { color: var(--flame); }
+.hud { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 8px; }
+.hud > div { min-width: 0; padding: 4px; border-right: 1px solid #5c4937; }
+.hud span { display: block; font-size: 16px; color: var(--muted); }
+.hud strong { display: block; font-size: 21px; font-weight: 400; overflow-wrap: anywhere; }
+.hud > p { grid-column: 1 / -1; margin: 0; font-size: 19px; }
+@media (max-width: 720px) { .hud { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 #session { margin: 0 0 12px; font-family: ui-monospace, monospace; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .controls { font-size: 14px; }
 kbd { display: inline-block; min-width: 1.5em; padding: 0 5px; font-size: 18px; line-height: 1.2; text-align: center; color: var(--ink);
@@ -137,5 +142,5 @@ footer { margin-top: 30px; padding-top: 12px; font-size: 12px; border-top: 2px s
   .skill-menu span { font-size: 26px; }
   table { display: block; overflow-x: auto; }
   .stage { padding: 6px; }
-  .metrics, .score-hud { font-size: 19px; }
+  .metrics, .hud { font-size: 19px; }
 }

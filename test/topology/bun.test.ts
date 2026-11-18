@@ -30,13 +30,13 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
     expect(await new Lobby(client).rows()).toEqual([]);
     const writer = await createSession(client, { playerName: "Bun", identity });
     await writer.append(frames.slice(0, 175));
-    let rows: { value: { tic: number } }[] = [];
+    let rows: { type: string; value: { tic: number } }[] = [];
     for (let n = 0; n < 100; n++) {
-      rows = await client.json("doom/v2/scores");
-      if (rows.at(-1)?.value.tic === 175) break;
+      rows = await client.json(`doom/v2/games/${writer.row.id}`);
+      if (rows.filter((r: any) => r.type === "stats").at(-1)?.value.tic === 175) break;
       await Bun.sleep(10);
     }
-    expect(rows.at(-1)?.value.tic).toBe(175);
+    expect(rows.filter((r: any) => r.type === "stats").at(-1)?.value.tic).toBe(175);
     await snapshotEntries(client, writer.row.id, [175]);
     for (const path of [indexPath(writer.row.id), snapshotPath(writer.row.id, 175)]) {
       for (const method of ["PUT", "POST", "DELETE", "PATCH", "OPTIONS"]) expect((await fetch(new URL(path, host.url), { method })).status).toBe(405);
@@ -47,7 +47,7 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
     expect(requests).toBe(before);
     const child = await forkSession(client, writer.row.id, 10, { playerName: "Child" });
     expect(familyOf(child.row.id)).toBe(familyOf(writer.row.id));
-    const response = await fetch(new URL("doom/v2/scores", host.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" });
+    const response = await fetch(new URL("doom/v2/entries", host.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" });
     expect(response.status).toBe(405);
     expect((await fetch(new URL("__scores/doom/v2/scores", host.url), { method: "POST" })).status).toBe(404);
     expect((await fetch(new URL("doom/v2/sessions/not-valid", host.url), { method: "PUT" })).status).toBe(404);
@@ -72,7 +72,7 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
     const childExpiry = (await client.request(sessionPath(child.row.id), { method: "HEAD" })).headers.get("Stream-Expires-At")!;
     expect(Date.parse(childExpiry)).toBeGreaterThan(Date.parse(parentExpiry));
     for (const id of [parent.row.id, child.row.id]) {
-      for (const path of [sessionPath(id), `doom/v2/batches/${id}`, `doom/v2/replay-wake/${id}`]) {
+      for (const path of [sessionPath(id), `doom/v2/batches/${id}`, `doom/v2/replay-wake/${id}`, `doom/v2/games/${id}`]) {
         const head = await client.request(path, { method: "HEAD" });
         expect(head.headers.get("Stream-TTL")).toBeNull();
         expect(Date.parse(head.headers.get("Stream-Expires-At")!) - Date.now()).toBeGreaterThan(86_390_000);
@@ -80,8 +80,8 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
       }
     }
     for (let n = 0; n < 100; n++) {
-      const rows = await client.json<{ value: { tic: number } }>("doom/v2/scores");
-      if (rows.some(row => row.value.tic === 175)) break;
+      const rows = await client.json<{ type: string; value: { tic: number } }>(`doom/v2/games/${parent.row.id}`);
+      if (rows.some(row => row.type === "stats" && row.value.tic === 175)) break;
       await Bun.sleep(10);
     }
     await snapshotEntries(client, parent.row.id, [175]);
@@ -93,14 +93,14 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
     console.log(`MEASURED Bun: family/replay/lobby shared database idle SQL queries in 1s=${idle}`);
     expect(idle).toBeLessThanOrEqual(5);
     await Bun.sleep(30_000);
-    const idleRows = await client.json<{ key: string; value: { tic: number; live: boolean; verified: boolean } }>("doom/v2/scores");
-    expect(idleRows.filter(row => row.key === parent.row.id).at(-1)?.value).toMatchObject({ live: false, tic: 175, verified: true });
+    const idleRows = await client.json<{ key: string; value: import("../../src/streams/v2").EntryRow }>("doom/v2/entries");
+    expect(idleRows.filter(row => row.key === parent.row.id).at(-1)?.value).toMatchObject({ live: false, score: { tic: 175, verified: true } });
     expect(idleRows.filter(row => row.key === child.row.id).at(-1)?.value.live).toBe(false);
     await parent.append(frames.slice(175, 350));
     for (let n = 0; n < 100; n++) {
-      const rows = await client.json<{ key: string; value: { tic: number; live: boolean } }>("doom/v2/scores");
+      const rows = await client.json<{ key: string; value: { score: { tic: number }; live: boolean } }>("doom/v2/entries");
       const row = rows.filter(row => row.key === parent.row.id).at(-1)?.value;
-      if (row?.tic === 350) { expect(row.live).toBe(true); break; }
+      if (row?.score?.tic === 350) { expect(row.live).toBe(true); break; }
       if (n === 99) throw new Error("Bun replay did not resume after idle eviction");
       await Bun.sleep(10);
     }
@@ -136,3 +136,24 @@ test("Bun snapshot table persists beside streams, expires rows and clears them w
     expect(sql.query("SELECT count(*) AS n FROM server_snapshots WHERE id = ?").get(writer.row.id)).toEqual({ n: 0 });
   } finally { sql?.close(); await host.stop(); }
 }, 15000);
+
+test("Bun bootstrap serializes repeated metadata creation and rejects browser State writes", async () => {
+  const host = await startHost({ port: 0, database: ":memory:" });
+  try {
+    const client = new ProtocolClient(host.url), writer = await createSession(client, { playerName: "  Server-owned  ", identity });
+    const path = `doom/v2/bootstrap/${writer.row.id}`, payload = { ...identity, playerName: "Changed", createdAt: "1900-01-01", ended: true };
+    const repeat = () => client.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then(r => r.json());
+    for (const row of await Promise.all([repeat(), repeat()])) expect(row).toEqual(writer.row);
+    expect(writer.row.playerName).toBe("Server-owned");
+    const { StateRows } = await import("../../src/streams");
+    const events = await client.json<any>(`doom/v2/games/${writer.row.id}`);
+    expect(events.filter(e => e.type === "session")).toHaveLength(1);
+    const sessions = new StateRows<any>("session"); sessions.apply(events);
+    expect(sessions.rows.get(writer.row.id).createdAt).not.toBe(payload.createdAt);
+    for (const path of [`doom/v2/games/${writer.row.id}`, "doom/v2/entries"]) for (const method of ["PUT", "POST", "DELETE"]) {
+      expect((await fetch(new URL(path, host.url), { method, headers: { "Content-Type": "application/json" }, body: "[]" })).status).toBe(405);
+    }
+    await expect(client.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, forkedFrom: "f".repeat(32) + "_" + "1".repeat(32), forkTic: 0 }) })).rejects.toMatchObject({ status: 400 });
+    await expect(client.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).rejects.toMatchObject({ status: 400 });
+  } finally { await host.stop(); }
+});
