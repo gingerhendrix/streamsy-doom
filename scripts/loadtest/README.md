@@ -73,4 +73,3 @@ Retry analytics after ingestion. Empty class results mean **not measured**. CPU 
 wall time are microseconds; memory is sampled isolate usage, not per-engine memory.
 Other traffic to the same class/window and adaptive sampling can affect telemetry.
 The fast integration test is `bun test test/topology/loadtest.test.ts` (real Miniflare).
-See [measured results](../../docs/performance.md).
