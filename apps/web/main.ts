@@ -8,7 +8,7 @@ import { loadWad } from "../../src/wad";
 import "./style.css";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
-app.innerHTML = `<header><h1>Streamsy <span>Doom</span></h1><p>A game made of streams.</p></header><p id="error" role="alert"></p><main></main><footer><a id="source">Source: GPL-2.0-or-later</a> · <span id="source-note"></span><br>Game data: <a href="/wad/manifest.json">WAD manifest and notices</a>. Default: Freedoom Phase 1 0.13.0 · BSD-3-Clause. Engine: DoomGeneric / id Software. No audio.</footer>`;
+app.innerHTML = `<header><h1>Streamsy <span>Doom</span></h1><p>A game made of streams.</p></header><p id="error" role="alert"></p><main></main><footer><a id="source">Source: GPL-2.0-or-later</a> · <span id="source-note"></span><br>Game data: <a href="/wad/manifest.json">WAD manifest and notices</a>. Default: Freedoom Phase 1 0.13.0 · BSD-3-Clause. Engine: DoomGeneric / id Software. No audio.<br>Display font: Jersey 10 · <a href="/fonts/OFL.txt">SIL Open Font License 1.1</a>.</footer>`;
 const source = document.querySelector<HTMLAnchorElement>("#source")!;
 // Supply the future public source URL at build time. Keep an explicit placeholder.
 const sourceUrl = (import.meta as ImportMeta & { env: Record<string, string> }).env.VITE_SOURCE_URL;
@@ -46,7 +46,7 @@ function paint(game: Engine) {
   canvas.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(game.render()), 320, 200), 0, 0);
 }
 function stage(title: string, row: SessionMetadata, controls: string) {
-  main.innerHTML = `<div class="toolbar"><h2 id="heading"></h2><button id="leave">Lobby</button></div><p id="session"></p><div class="stage"><canvas width="320" height="200" tabindex="0" aria-label="Doom game; click to focus keyboard"></canvas></div><div class="metrics" aria-live="off" id="metrics"></div><p class="score-hud" id="score-hud"></p>${controls}`;
+  main.innerHTML = `<div class="toolbar"><h2 id="heading"></h2><button id="leave">Lobby</button></div><p id="session"></p><div class="stage"><div class="screen"><canvas width="320" height="200" tabindex="0" aria-label="Doom game; click to focus keyboard"></canvas><div class="crt" aria-hidden="true"></div></div></div><div class="metrics" aria-live="off" id="metrics"></div><p class="score-hud" id="score-hud"></p>${controls}`;
   document.querySelector("#heading")!.textContent = title;
   document.querySelector("#session")!.textContent = `${row.playerName} · Skill ${row.skill} · ${row.id}${row.forkedFrom ? ` · Fork of ${row.forkedFrom} at tic ${row.forkTic}` : ""}`;
   button("leave", showLobby);
@@ -55,12 +55,12 @@ function stage(title: string, row: SessionMetadata, controls: string) {
 async function showLobby() {
   await dispose(); dispose = async () => {};
   history.replaceState(null, "", location.pathname);
-  main.innerHTML = `<section><h2>Start a new timeline</h2><p>Play, watch live, or rewind and take the game in another direction.</p><form><label>Player name<input id="name" maxlength="40" value="Player" required></label><label>Skill<select id="skill"><option value="1">1 · I'm too young to die</option><option value="2">2 · Hey, not too rough</option><option value="3" selected>3 · Hurt me plenty</option><option value="4">4 · Ultra-Violence</option><option value="5">5 · Nightmare!</option></select></label><button class="primary">New game</button></form></section><section><h2>Sessions <span id="count"></span></h2><p id="transport">Connecting…</p><div id="sessions">Loading lobby…</div><p class="hint">Scores publish on stat changes or every five seconds of play. ¹Age is time since this tab received the score at its projected tic; initial history has no server timestamp. Watch shows lag in tics. New tabs replay retained lobby history.</p></section>`;
+  main.innerHTML = `<section class="new-game"><h2>Start a new timeline</h2><p>Play, watch live, or rewind and take the game in another direction.</p><form><label>Player name<input id="name" maxlength="40" value="Player" required></label><fieldset class="skill-menu" id="skill"><legend>Choose your skill</legend><label><input type="radio" name="skill" value="1"><span>I'm too young to die</span></label><label><input type="radio" name="skill" value="2"><span>Hey, not too rough</span></label><label><input type="radio" name="skill" value="3" checked><span>Hurt me plenty</span></label><label><input type="radio" name="skill" value="4"><span>Ultra-Violence</span></label><label><input type="radio" name="skill" value="5"><span>Nightmare!</span></label></fieldset><button class="primary">New game</button></form></section><section class="tally"><h2>Sessions <span id="count"></span></h2><p id="transport">Connecting…</p><div id="sessions">Loading lobby…</div><p class="hint">Scores publish on stat changes or every five seconds of play. ¹Age is time since this tab received the score at its projected tic; initial history has no server timestamp. Watch shows lag in tics. New tabs replay retained lobby history.</p></section>`;
   document.querySelector("form")!.addEventListener("submit", event => {
     event.preventDefault();
     void action(async () => {
       const playerName = document.querySelector<HTMLInputElement>("#name")!.value.trim() || "Player";
-      const skill = Number(document.querySelector<HTMLSelectElement>("#skill")!.value);
+      const skill = Number(document.querySelector<HTMLInputElement>("#skill input:checked")!.value);
       document.querySelector<HTMLButtonElement>("form button")!.disabled = true;
       try {
         const game = await engine({ skill });
@@ -116,7 +116,7 @@ function renderRows(rows: SessionMetadata[], scores: ReadonlyMap<string, StatsRo
     name.append(el("strong", row.playerName), el("br", ""), el("code", row.id.slice(33, 41)));
     if (row.forkedFrom) name.append(el("p", `Forked at ${row.forkTic}`));
     tr.append(name);
-    for (const text of scoreCells(score)) tr.append(el("td", text));
+    for (const text of scoreCells(score)) { const cell = el("td", text); cell.className = "num"; tr.append(cell); }
     const badge = el("td", verification(score)); badge.className = !score ? "pending" : score.verified ? "verified" : "unverified";
     const age = el("td", "Awaiting replay");
     if (score) {
@@ -137,7 +137,7 @@ function renderRows(rows: SessionMetadata[], scores: ReadonlyMap<string, StatsRo
 
 async function play(game: Engine, writer: SessionWriter) {
   await dispose();
-  stage("Playing", writer.row, `<p>Click the game to focus. W/S move forward/back · A/D turn left/right · Space fires · Enter uses/interacts. Arrows also move/turn · Ctrl also fires · Alt strafes · Shift runs · Comma/Period strafe · 1–7 selects a weapon. Blur pauses local play and releases keys.</p><button id="end">End game & return to lobby</button>`);
+  stage("Playing", writer.row, `<p class="controls">Click the game to focus. <kbd>W</kbd>/<kbd>S</kbd> move forward/back · <kbd>A</kbd>/<kbd>D</kbd> turn left/right · <kbd>Space</kbd> fires · <kbd>Enter</kbd> uses/interacts. Arrows also move/turn · <kbd>Ctrl</kbd> also fires · <kbd>Alt</kbd> strafes · <kbd>Shift</kbd> runs · <kbd>,</kbd>/<kbd>.</kbd> strafe · <kbd>1</kbd>–<kbd>7</kbd> selects a weapon. Blur pauses local play and releases keys.</p><button id="end">End game & return to lobby</button>`);
   history.replaceState(null, "", `#watch/${writer.row.id}`);
   const canvas = document.querySelector<HTMLCanvasElement>("canvas")!;
   const store = new SnapshotStore(client, writer.row.id);
