@@ -10,7 +10,7 @@ import { framesLink } from "../../apps/host-cloudflare/topology";
 import { Streamsy } from "@streamsy/core";
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
 import { Game, ReplayWake, type StatsRow } from "../../src/streams/v2";
-import worker, { DoomGames as Games, DoomReplay as Replay, DoomLobby as Lobby, type Env } from "../../apps/host-cloudflare/worker";
+import worker, { gamesHost, DoomReplay as Replay, DoomLobby as Lobby, type Env } from "../../apps/host-cloudflare/worker";
 export { DoomStreams } from "../../apps/host-cloudflare/worker";
 export default worker;
 // Count only application SQL submitted through Streamsy's storage connection.
@@ -20,36 +20,43 @@ function instrument(owner: DurableObjectState) {
   Object.defineProperty(sql, "exec", { value: (...args: Parameters<typeof sql.exec>) => { queries++; return exec(...args); } });
   return { state: owner, count: () => queries };
 }
-export class DoomGames extends Games {
-  private readonly queries: () => number;
-  private readonly frameReads: { path: string; offset: string | null }[] = [];
-  constructor(private readonly probeState: DurableObjectState, env: Env) {
-    const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
-  }
-  override async alarm() {
-    await this.probeState.storage.put("test-alarm", [...(await this.probeState.storage.get<number[]>("test-alarm") ?? []), Date.now()]);
-    await super.alarm();
-  }
-  override async fetch(request: Request) {
-    const url = new URL(request.url);
-    if (url.pathname === "/__test/probe") return Response.json({ queries: this.queries(), frameReads: this.frameReads, frameAt: await this.probeState.storage.get("test-frame-at"), alarm: await this.probeState.storage.get("test-alarm"), armed: await this.probeState.storage.getAlarm() });
-    if (url.pathname.startsWith("/__frames/doom/v2/sessions/") && request.method === "GET")
-      this.frameReads.push({ path: url.pathname, offset: url.searchParams.get("offset") });
-    if (url.pathname === "/__test/quiet") return this.probeState.blockConcurrencyWhile(async () => {
-      const response = await super.fetch(new Request(new URL(url.searchParams.get("path")!, url), { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: await request.arrayBuffer() }));
-      // Simulate commit-before-alarm loss without changing Streamsy's SQL writes.
-      await this.probeState.storage.deleteAlarm();
+function tracedGames(concurrency?: number) {
+  return class extends gamesHost(concurrency) {
+    private readonly queries: () => number;
+    private readonly frameReads: { path: string; offset: string | null }[] = [];
+    constructor(private readonly probeState: DurableObjectState, env: Env) {
+      const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
+    }
+    override async alarm() {
+      await this.probeState.storage.put("test-alarm", [...(await this.probeState.storage.get<number[]>("test-alarm") ?? []), Date.now()]);
+      await super.alarm();
+    }
+    override async fetch(request: Request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/__test/probe") return Response.json({ queries: this.queries(), frameReads: this.frameReads, frameAt: await this.probeState.storage.get("test-frame-at"), alarm: await this.probeState.storage.get("test-alarm"), armed: await this.probeState.storage.getAlarm() });
+      if (url.pathname.startsWith("/__frames/doom/v2/sessions/") && request.method === "GET")
+        this.frameReads.push({ path: url.pathname, offset: url.searchParams.get("offset") });
+      if (url.pathname === "/__test/quiet") return this.probeState.blockConcurrencyWhile(async () => {
+        const response = await super.fetch(new Request(new URL(url.searchParams.get("path")!, url), { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: await request.arrayBuffer() }));
+        // Simulate commit-before-alarm loss without changing Streamsy's SQL writes.
+        await this.probeState.storage.deleteAlarm();
+        return response;
+      });
+      if (url.pathname === "/__test/run-wake") { await this.probeState.storage.setAlarm(Date.now()); return new Response(null, { status: 204 }); }
+      const response = await super.fetch(request);
+      if (url.pathname.startsWith("/doom/v2/sessions/") && request.method === "POST" && response.ok)
+        await this.probeState.storage.put("test-frame-at", Date.now());
       return response;
-    });
-    const response = await super.fetch(request);
-    if (url.pathname.startsWith("/doom/v2/sessions/") && request.method === "POST" && response.ok)
-      await this.probeState.storage.put("test-frame-at", Date.now());
-    return response;
-  }
+    }
+  };
 }
+export class DoomGames extends tracedGames() {}
+export class DoomGamesSerial extends tracedGames(1) {}
 export class DoomReplay extends Replay {
   private readonly probeEnv: Env;
   private steps = 0;
+  private delayWake = false;
+  private wakes: { start: number; end: number }[] = [];
   private readonly queries: () => number;
   constructor(private readonly probeState: DurableObjectState, env: Env) {
     const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
@@ -104,6 +111,12 @@ export class DoomReplay extends Replay {
       await this.probeState.storage.setAlarm(Date.now());
       return new Response(null, { status: 204 });
     }
+    if (url.pathname === "/__test/delay-wake") { this.delayWake = true; this.wakes = []; return new Response(null, { status: 204 }); }
+    if (url.pathname.startsWith("/__wake/") && request.method === "POST" && this.delayWake) {
+      const wake = { start: Date.now(), end: 0 }; this.wakes.push(wake);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const response = await super.fetch(request); wake.end = Date.now(); return response;
+    }
     if (new URL(request.url).pathname === "/__test/game-events") {
       const { id, rows } = await request.json() as { id: string; rows: StatsRow[] };
       // Test-only writer using the published storage API, on this replay's SQL.
@@ -131,7 +144,7 @@ export class DoomReplay extends Replay {
     }
     if (new URL(request.url).pathname === "/__test/snapshots") return Response.json([...this.probeState.storage.sql.exec("SELECT tic,size,expires_at FROM server_snapshots ORDER BY tic")]);
     if (new URL(request.url).pathname === "/__test/evict") { this.engines.cache.clear(); return new Response(null, { status: 204 }); }
-    if (new URL(request.url).pathname === "/__test/probe") return Response.json({ queries: this.queries(), steps: this.steps, snapshot: await this.probeState.storage.get("test-snapshot-measurement"), alarm: await this.probeState.storage.get("test-alarm"), identity: await this.probeState.storage.get("doom-v2-session-id"), engines: [...this.engines.cache.values()].map(engine => engine.stats()), armed: await this.probeState.storage.getAlarm() });
+    if (new URL(request.url).pathname === "/__test/probe") return Response.json({ queries: this.queries(), steps: this.steps, wakes: this.wakes, snapshot: await this.probeState.storage.get("test-snapshot-measurement"), alarm: await this.probeState.storage.get("test-alarm"), identity: await this.probeState.storage.get("doom-v2-session-id"), engines: [...this.engines.cache.values()].map(engine => engine.stats()), armed: await this.probeState.storage.getAlarm() });
     return super.fetch(request);
   }
 }

@@ -199,4 +199,6 @@ The `doom-v2-leaderboard` projection uses Entries as its sole input and
 and removes deleted entries without a refill scan. The lobby streams do not expire;
 per-game expiry removes derived entries through `lobbyEntry`.
 
+The family `frameWake` attachment uses concurrency 8. Sibling bindings can overlap replay-object delivery waits while each binding still processes its units in order. Local workerd tests compare it with concurrency 1 under a controlled response delay.
+
 The [engine transaction spike](../../docs/engine-transaction-spike.md) confirms async execution and atomic rollback on workerd, but production retains `Commit.producer` because a transaction Commit cannot resume a persisted producer pin in Streamsy 0.12.0. No checkpoint reset or projection identity change is applied.

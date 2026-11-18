@@ -22,13 +22,13 @@ const until = async <A>(probe: () => Promise<A | undefined>, label: string): Pro
   throw new Error(`Timed out: ${label}`);
 };
 type Score = { key: string; value: StatsRow };
-async function harness(snapshotInterval?: number) {
+async function harness(snapshotInterval?: number, serialFrameWake = false) {
   const root = await mkdtemp(`${scratch}/workerd-`);
   const scriptPath = await bundleWorker("test/topology/probe-worker.ts", `${root}/bundle`);
   const start = () => new Miniflare({ name: "doom-test", rootPath: root, modulesRoot: `${root}/bundle`,
     modules: [{ type: "ESModule", path: scriptPath }, { type: "CompiledWasm", path: `${root}/bundle/doom.wasm` }], compatibilityDate: "2026-07-30", compatibilityFlags: ["nodejs_compat"], cf: false,
     assets: { directory: new URL("../../dist", import.meta.url).pathname, binding: "ASSETS", routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },
-    durableObjects: { STREAMS: { className: "DoomStreams", useSQLite: true }, GAMES: { className: "DoomGames", useSQLite: true }, REPLAYS: { className: "DoomReplay", useSQLite: true }, LOBBY: { className: "DoomLobby", useSQLite: true } },
+    durableObjects: { STREAMS: { className: "DoomStreams", useSQLite: true }, GAMES: { className: serialFrameWake ? "DoomGamesSerial" : "DoomGames", useSQLite: true }, REPLAYS: { className: "DoomReplay", useSQLite: true }, LOBBY: { className: "DoomLobby", useSQLite: true } },
     durableObjectsPersist: `${root}/state`,
     bindings: snapshotInterval === undefined ? {} : { DOOM_SNAPSHOT_INTERVAL: String(snapshotInterval) },
   });
@@ -714,3 +714,41 @@ test("workerd: transaction spike cannot resume a persisted producer pin on upgra
     console.log("MEASURED workerd transaction upgrade gap: Streamsy 0.12.0 rejects an existing pending producer checkpoint with 'Commit transaction cannot resume a pinned unit'; production keeps Commit.producer");
   } finally { await h.stop(); }
 }, 30000);
+
+test("workerd: sibling frame wakes overlap at concurrency 8 versus the serial default", async () => {
+  const measure = async (serial: boolean) => {
+    const h = await harness(undefined, serial);
+    try {
+      const parent = await createSession(h.client, { playerName: "Wake parent", identity });
+      await parent.append(frames.slice(0, 5)); await h.score(parent.row.id, 5, false);
+      const siblings = [];
+      for (let n = 0; n < 4; n++) siblings.push(await forkSession(h.client, parent.row.id, 5, { playerName: `Sibling ${n}` }));
+      for (const writer of siblings) await h.score(writer.row.id, 5, false);
+      await Bun.sleep(100);
+      const owners = await Promise.all(siblings.map(writer => h.stub("REPLAYS", `replay:${writer.row.id}`)));
+      for (const owner of owners) await owner.fetch("https://internal/__test/delay-wake", { method: "POST" });
+      const family = await h.stub("GAMES", `game:${familyOf(parent.row.id)}`);
+      for (const writer of siblings) {
+        const path = encodeURIComponent(`/${sessionPath(writer.row.id)}`);
+        expect((await family.fetch(`https://internal/__test/quiet?path=${path}`, { method: "POST", body: concat(frames.slice(5, 10)) })).status).toBe(204);
+      }
+      const began = performance.now();
+      await family.fetch("https://internal/__test/run-wake", { method: "POST" });
+      const wakes = await until(async () => {
+        const samples = await Promise.all(owners.map(async owner => (await (await owner.fetch("https://internal/__test/probe")).json() as { wakes: { start: number; end: number }[] }).wakes));
+        return samples.every(sample => sample[0]?.end) ? samples.map(sample => sample[0]) : undefined;
+      }, "sibling wakes");
+      const ms = performance.now() - began;
+      const events = wakes.flatMap(wake => [{ at: wake.start, delta: 1 }, { at: wake.end, delta: -1 }]).sort((a, b) => a.at - b.at || a.delta - b.delta);
+      let active = 0, peak = 0;
+      for (const event of events) { active += event.delta; peak = Math.max(peak, active); }
+      for (const writer of siblings) await h.score(writer.row.id, 10, false);
+      return { ms, peak, spanMs: Math.max(...wakes.map(wake => wake.end)) - Math.min(...wakes.map(wake => wake.start)) };
+    } finally { await h.stop(); }
+  };
+  const serial = await measure(true), concurrent = await measure(false);
+  console.log(`MEASURED local workerd sibling wake delivery, 4 forks with 100ms injected response delay: concurrency 1=${JSON.stringify(serial)}; concurrency 8=${JSON.stringify(concurrent)}`);
+  expect(serial.peak).toBe(1);
+  expect(concurrent.peak).toBeGreaterThan(1);
+  expect(concurrent.spanMs).toBeLessThan(serial.spanMs);
+}, 60000);

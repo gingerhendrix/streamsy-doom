@@ -31,10 +31,13 @@ export class DoomStreams {
 const gameLayer = (state: DurableObjectState) => CheckpointStore.layer.pipe(
   Layer.provideMerge(DurableObjectStorage.layer(familyStreams, { client: { storage: state.storage }, longPollTimeoutMs: 20_000 })),
 );
-export const DoomGames = StreamsyObject.make<Env, Layer.Success<ReturnType<typeof gameLayer>>, ReplayWake>({
+// Independent sibling bindings can await replay objects concurrently.
+export const FRAME_WAKE_CONCURRENCY = 8;
+export const gamesHost = (concurrency = FRAME_WAKE_CONCURRENCY) => StreamsyObject.make<Env, Layer.Success<ReturnType<typeof gameLayer>>, ReplayWake>({
   app: Layer.merge(Http.routes(familyStreams, { prefix: "/", access: "full", maxMessageSize: 2_000_000 }), framesLink.routes),
-  layer: gameLayer, links: env => [wakeLink.client(env.REPLAYS)], wakeups: [ProjectionWakeup.attach(frameWake)],
+  layer: gameLayer, links: env => [wakeLink.client(env.REPLAYS)], wakeups: [ProjectionWakeup.attach(frameWake, { concurrency })],
 });
+export const DoomGames = gamesHost();
 const initLobby = HttpRouter.add("POST", "/__init-lobby", Effect.gen(function* () {
   yield* initLobbyStreams;
   return HttpServerResponse.empty({ status: 204 });
