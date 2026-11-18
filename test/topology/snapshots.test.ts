@@ -25,3 +25,27 @@ test("snapshot table scopes Bun sessions, keeps the first tic, filters expiry an
     expect(() => makeReplayStats({ snapshotInterval: 0 })).toThrow("Invalid snapshot interval");
   } finally { database.close(); }
 });
+
+test("snapshot cursor migration and newest lookup respect session, checkpoint and expiry", () => {
+  const database = new Database(":memory:");
+  database.run("CREATE TABLE server_snapshots (id TEXT NOT NULL,tic INTEGER NOT NULL,size INTEGER NOT NULL,expires_at INTEGER NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(id,tic))");
+  database.run("INSERT INTO server_snapshots VALUES ('a',5,1,2000,x'01')");
+  const sql = { run: (query: string, values: import("../../src/projection/snapshots").SqlValue[]) => { database.query(query).run(...values); },
+    all: <A>(query: string, values: import("../../src/projection/snapshots").SqlValue[]) => database.query(query).all(...values) as A[] };
+  const table = snapshotTable(sql, true, () => 1000);
+  try {
+    expect(table.latest("a", 5)).toMatchObject({ tic: 5, resume: undefined });
+    const resume = { offset: "opaque-page-boundary", frames: new Uint8Array([1, 2, 3]) };
+    table.write("a", 10, new Uint8Array([2]), 2000, resume);
+    table.write("a", 20, new Uint8Array([3]), 2000);
+    table.write("b", 15, new Uint8Array([4]), 2000);
+    expect(table.latest("a", 19)).toMatchObject({ tic: 10, resume });
+    expect(table.latest("a", 9)?.tic).toBe(5);
+    expect(table.latest("a", 4)).toBeUndefined();
+    expect(table.latest("b", 19)?.tic).toBe(15);
+    database.run("UPDATE server_snapshots SET expires_at = 1000 WHERE id = 'a' AND tic = 20");
+    expect(table.latest("a", 100)?.tic).toBe(10);
+    // Reopening the migrated table is idempotent.
+    expect(snapshotTable(sql, true, () => 1000).latest("a", 19)).toEqual(table.latest("a", 19));
+  } finally { database.close(); }
+});

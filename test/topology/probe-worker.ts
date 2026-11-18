@@ -17,6 +17,7 @@ function instrument(owner: DurableObjectState) {
 }
 export class DoomGames extends Games {
   private readonly queries: () => number;
+  private readonly frameReads: { path: string; offset: string | null }[] = [];
   constructor(private readonly probeState: DurableObjectState, env: Env) {
     const traced = instrument(probeState); super(traced.state, env); this.queries = traced.count;
   }
@@ -26,7 +27,9 @@ export class DoomGames extends Games {
   }
   override async fetch(request: Request) {
     const url = new URL(request.url);
-    if (url.pathname === "/__test/probe") return Response.json({ queries: this.queries(), frameAt: await this.probeState.storage.get("test-frame-at"), alarm: await this.probeState.storage.get("test-alarm"), armed: await this.probeState.storage.getAlarm() });
+    if (url.pathname === "/__test/probe") return Response.json({ queries: this.queries(), frameReads: this.frameReads, frameAt: await this.probeState.storage.get("test-frame-at"), alarm: await this.probeState.storage.get("test-alarm"), armed: await this.probeState.storage.getAlarm() });
+    if (url.pathname.startsWith("/__frames/doom/v2/sessions/") && request.method === "GET")
+      this.frameReads.push({ path: url.pathname, offset: url.searchParams.get("offset") });
     if (url.pathname === "/__test/quiet") return this.probeState.blockConcurrencyWhile(async () => {
       const response = await super.fetch(new Request(new URL(url.searchParams.get("path")!, url), { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: await request.arrayBuffer() }));
       // Simulate commit-before-alarm loss without changing Streamsy's SQL writes.
@@ -81,6 +84,9 @@ export class DoomReplay extends Replay {
     if (new URL(request.url).pathname === "/__test/expire-game") {
       this.probeState.storage.sql.exec("UPDATE streamsy_streams SET expires_at_ms = 0, expires_at = '1970-01-01T00:00:00.000Z' WHERE stream_id LIKE 'doom/v2/games/%'");
       await this.probeState.storage.setAlarm(Date.now()); return new Response(null, { status: 204 });
+    }
+    if (new URL(request.url).pathname === "/__test/legacy-snapshots") {
+      this.probeState.storage.sql.exec("UPDATE server_snapshots SET resume_offset = NULL, resume_frames = NULL"); return new Response(null, { status: 204 });
     }
     if (new URL(request.url).pathname === "/__test/expire-snapshots") {
       this.probeState.storage.sql.exec("UPDATE server_snapshots SET expires_at = 0"); return new Response(null, { status: 204 });

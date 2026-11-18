@@ -110,3 +110,24 @@ test("lobby delivery retry delay starts at one second and caps at thirty", async
   }));
   expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000]);
 });
+
+test("headless snapshot restore validates identity, heap and tic before replaying matching stats", async () => {
+  const { gunzipSync, gzipSync } = await import("fflate");
+  const engine = await createHeadless(log.identity);
+  for (const frame of log.frames.slice(0, 750)) engine.step(frame);
+  const bytes = await engine.snapshot();
+  const raw = gunzipSync(bytes), newline = raw.indexOf(10);
+  const metadata = JSON.parse(new TextDecoder().decode(raw.subarray(0, newline)));
+  const changed = (fields: object, heap = raw.subarray(newline + 1)) => gzipSync(concat([encode({ ...metadata, ...fields }), heap]));
+  const restored = await createHeadless(log.identity);
+  for (const key of ["version", "buildId", "wadSha256", "skill", "episode", "map"])
+    expect(() => restored.restore(changed({ [key]: "mismatch" }))).toThrow(`Snapshot ${key} mismatch`);
+  expect(() => restored.restore(changed({}, new Uint8Array(1)))).toThrow("heap size mismatch");
+  expect(() => restored.restore(changed({ tic: 999 }))).toThrow("tic mismatch");
+  restored.restore(bytes);
+  expect(restored.tic).toBe(750);
+  for (let tic = 750; tic < 1000; tic++) {
+    expect(restored.step(log.frames[tic])).toBe(true);
+    expect(restored.stats()).toEqual(log.samples[tic]);
+  }
+});

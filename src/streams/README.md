@@ -84,7 +84,7 @@ replays the engine, accumulates kills/items/secrets across resets and alive→de
 transitions, and publishes health, armor, level totals, episode/map, weapon/ammo,
 `alive`, `verified` and `tic` into Game. RNG drift is sticky; transport failures retain the retry path. Engine projection `doom-v2-replay` uses `Commit.producer`, with a local output. Renaming the previous `doom-v2-replay-stats` identity causes existing live games to replay from zero after rollout; existing snapshot inserts remain idempotent.
 
-Stats emit on visible changes or a 175-tic bucket, retaining qualifying tics inside each engine unit. `replayIdle` alone writes Game presence: input sets `live: true`, and after 30 seconds without input the timer waits for the engine checkpoint to settle, sets false and releases the engine. Its in-memory presence flag can cause one redundant true after eviction. An engine cache miss still replays inputs from zero. Forks include inherited stats.
+Stats emit on visible changes or a 175-tic bucket, retaining qualifying tics inside each engine unit. `replayIdle` alone writes Game presence: input sets `live: true`, and after 30 seconds without input the timer waits for the engine checkpoint to settle, sets false and releases the engine. Its in-memory presence flag can cause one redundant true after eviction. An engine cache miss restores the newest unexpired server snapshot at or below the checkpoint tic, validates build/WAD/settings, and replays the remainder. Without a snapshot it replays from zero. Forks include inherited stats.
 
 `lobbyEntry` (`doom-v2-lobby-entry`) folds Game session, stats and presence, coalescing each unit to at most one Entries change. Each entry contains the session fields, `live`, and `score: null` or `{ tic, episode, map, kills, deaths, items, secrets, alive, verified }`. The first stats, session changes and presence changes publish immediately. Further stats publish only after the 175-tic bucket advances. Metadata and presence can therefore exceed the stats-only cap. Larger units skip intermediate summaries; arbitrary unit splits can change the coalesced output sequence. Retries of a pinned unit produce identical output. Producer delivery is separate from the engine, with exponential backoff capped at 30 seconds. Expired Game delivers `gone` and removes the entry (verified in local workerd).
 
@@ -161,7 +161,7 @@ be forked via this API. `writer.end()` calls the server to mark the Game session
 close the binary stream.
 
 The replay owns `server_snapshots(tic PRIMARY KEY, size, expires_at, bytes BLOB)`.
-Bun uses the same table with `(id, tic)` as the key. The replay projection writes
+Bun uses the same table with `(id, tic)` as the key. Nullable `resume_offset` and `resume_frames` columns migrate existing tables. New snapshots retain the input page cursor and the already-read suffix after their tic, including a partial trailing frame. Recovery consumes that suffix and reads only after the opaque cursor. Legacy rows without these columns populated restore their engine but must download and discard the earlier frames; snapshot bytes and public endpoints remain unchanged. The suffix adds at most the remainder of an input page per snapshot. The replay projection writes
 through `SnapshotTable` using `INSERT OR IGNORE`; a write that precedes a failed
 producer checkpoint is safe to repeat. Snapshots are gzip of the identity/tic JSON
 line followed by the heap XOR the post-init baseline, preserving browser restore

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { compressSnapshot } from "./snapshot";
+import { gunzipSync } from "fflate";
 import { readStats } from "./stats.js";
 import type { EngineIdentity, EngineStats } from "./engine.js";
 export interface HeadlessEngine {
@@ -7,6 +8,7 @@ export interface HeadlessEngine {
   stats(): EngineStats;
   /** Hold the engine between steps/reset until streaming compression settles. */
   snapshot(): Promise<Uint8Array>;
+  restore(bytes: Uint8Array): void;
   /** Returns false for RNG drift; malformed commands remain errors. */
   step(frame: Uint8Array): boolean;
   reset(identity: EngineIdentity): void;
@@ -36,6 +38,17 @@ export function headlessFactory(factory: (options: any) => Promise<any>, wad: Ui
     return {
       get tic() { return module._dg_gametic(); }, reset,
       snapshot: () => compressSnapshot(currentIdentity, module._dg_gametic(), module.HEAPU8, initialized!),
+      restore(bytes) {
+        const raw = gunzipSync(bytes), newline = raw.indexOf(10);
+        if (newline < 0) throw new Error("Missing snapshot metadata");
+        const metadata = JSON.parse(new TextDecoder().decode(raw.subarray(0, newline)));
+        for (const [key, value] of Object.entries(currentIdentity))
+          if (metadata[key] !== value) throw new Error(`Snapshot ${key} mismatch`);
+        const delta = raw.subarray(newline + 1);
+        if (delta.length !== module.HEAPU8.length) throw new Error("Snapshot heap size mismatch");
+        for (let i = 0; i < delta.length; i++) module.HEAPU8[i] = delta[i] ^ initialized![i];
+        if (module._dg_gametic() !== metadata.tic) throw new Error("Snapshot tic mismatch");
+      },
       stats() { return readStats(module); },
       step(frame) {
         if (frame.length !== 9) throw new Error("Replay needs a 9-byte frame");

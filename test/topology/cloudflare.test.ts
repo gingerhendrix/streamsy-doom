@@ -226,7 +226,7 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
     const child = await forkSession(h.client, writer.row.id, 2100, { playerName: "Inherited death" });
     const childRow = await h.score(child.row.id, 2100);
     expect(childRow).toMatchObject({ kills: 3, deaths: 1, verified: true });
-    // Player heaps cannot be uploaded. Cache rebuild still uses inputs from zero.
+    // Player heaps cannot be uploaded. Recovery uses only server snapshots.
     await expect(h.client.append(snapshotPath(writer.row.id, 21175), new Uint8Array([255]))).rejects.toMatchObject({ status: 405 });
     await replay.fetch("https://internal/__test/evict", { method: "POST" });
     await writer.append(log.frames.slice(21175, 21350));
@@ -239,7 +239,7 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
     await writer.append(log.frames.slice(21350, 21525));
     expect((await h.score(writer.row.id, 21525)).verified).toBe(true);
     const warmMs = performance.now() - resumedAt;
-    console.log(`MEASURED local workerd: cold 21000-tic projection append→score=${coldMs.toFixed(1)} ms; cache-miss rebuild 21000+175 tics append→score=${rebuildMs.toFixed(1)} ms; warm 175-tic append→score=${warmMs.toFixed(1)} ms`);
+    console.log(`MEASURED local workerd: cold 21000-tic projection append→score=${coldMs.toFixed(1)} ms; snapshot cache-miss +175 tics append→score=${rebuildMs.toFixed(1)} ms; warm 175-tic append→score=${warmMs.toFixed(1)} ms`);
     await until(async () => {
       const latest = (await h.scores()).filter(row => row.key === writer.row.id).at(-1)?.value;
       return latest?.live === false ? latest : undefined;
@@ -595,5 +595,63 @@ test("workerd: cold leaderboard snapshot is empty; 60 server sessions load the n
     console.log(`MEASURED workerd Leaderboard snapshot: ${JSON.stringify(measurement)}`);
     for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE"]) expect((await h.send("doom/v2/entries", { method })).status).toBe(404);
     for (const method of ["POST", "PUT", "DELETE"]) expect((await h.send(path, { method })).status).toBe(405);
+  } finally { await h.stop(); }
+}, 30000);
+
+test("workerd: cold rebuild restores newest snapshot, reuses page suffix and reads only later frames", async () => {
+  const log = await recording(450);
+  const h = await harness(100);
+  try {
+    const writer = await createSession(h.client, { playerName: "Cold cursor", identity: log.identity });
+    const id = writer.row.id, replay = await h.stub("REPLAYS", `replay:${id}`), family = await h.stub("GAMES", `game:${familyOf(id)}`);
+    const probe = async () => await (await replay.fetch("https://internal/__test/probe")).json() as { steps: number; engines: unknown[] };
+    const reads = async () => (await (await family.fetch("https://internal/__test/probe")).json() as { frameReads: { offset: string }[] }).frameReads;
+    const expected = await replayPages(initialStats(), [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames])], await createHeadless(log.identity), id);
+    await writer.append(log.frames.slice(0, 225)); await h.score(id, 225, false);
+    await snapshotEntries(h.client, id, [100, 200]);
+    const before = await probe(), readCount = (await reads()).length;
+    await replay.fetch("https://internal/__test/evict", { method: "POST" });
+    await writer.append(log.frames.slice(225, 250)); await h.score(id, 250, false);
+    expect((await probe()).steps - before.steps).toBe(50); // 25 persisted suffix + 25 new
+    expect((await reads()).slice(readCount).every(read => read.offset !== "-1")).toBe(true);
+    await writer.append(log.frames.slice(250, 300)); await h.score(id, 300, false);
+    const snapshotOffset = writer.offset;
+    await writer.append(log.frames.slice(300, 350)); await h.score(id, 350);
+    const at350 = await probe(), reads350 = (await reads()).length;
+    await replay.fetch("https://internal/__test/evict", { method: "POST" });
+    await writer.append(log.frames.slice(350, 450)); await h.score(id, 450, false);
+    const after = await probe();
+    expect(after.steps - at350.steps).toBe(150); // snapshot 300 → checkpoint 350 → head 450
+    expect(after.engines[0]).toEqual(log.final);
+    expect((await h.scores()).filter(row => row.key === id).at(-1)!.value).toMatchObject(expected.rows.at(-1)!);
+    expect((await reads()).slice(reads350).map(read => read.offset)).toContain(snapshotOffset);
+    expect((await reads()).slice(reads350).every(read => read.offset !== "-1")).toBe(true);
+    console.log("MEASURED workerd cold recovery: checkpoint 225 from snapshot 200 = 25 suffix steps, 0 prefix reads; checkpoint 350 from snapshot 300 = 50 recovery steps; final stats equal replay from zero");
+  } finally { await h.stop(); }
+}, 30000);
+
+test("workerd: snapshot recovery preserves partial frames and restores legacy rows without cursors", async () => {
+  const h = await harness(100), log = await recording(200);
+  try {
+    const writer = await createSession(h.client, { playerName: "Partial recovery", identity: log.identity });
+    const id = writer.row.id, path = sessionPath(id), replay = await h.stub("REPLAYS", `replay:${id}`);
+    const probe = async () => await (await replay.fetch("https://internal/__test/probe")).json() as { steps: number; engines: unknown[] };
+    await h.client.append(path, concat([...log.frames.slice(0, 125), log.frames[125].subarray(0, 4)]));
+    await h.score(id, 125, false);
+    await replay.fetch("https://internal/__test/evict", { method: "POST" });
+    await h.client.append(path, concat([log.frames[125].subarray(4), ...log.frames.slice(126, 150)]));
+    await h.score(id, 150, false);
+    const at150 = await probe();
+    await replay.fetch("https://internal/__test/evict", { method: "POST" });
+    await h.client.append(path, concat(log.frames.slice(150, 175))); await h.score(id, 175);
+    const at175 = await probe();
+    expect(at175.steps - at150.steps).toBe(75); // snapshot 100 through split frame to checkpoint 150, then 25 new
+    expect(at175.engines[0]).toEqual(log.samples[174]);
+    await replay.fetch("https://internal/__test/legacy-snapshots", { method: "POST" });
+    await replay.fetch("https://internal/__test/evict", { method: "POST" });
+    await h.client.append(path, concat(log.frames.slice(175))); await h.score(id, 200, false);
+    const final = await probe();
+    expect(final.steps - at175.steps).toBe(100); // legacy restores at 100; prefix is read but never stepped
+    expect(final.engines[0]).toEqual(log.final);
   } finally { await h.stop(); }
 }, 30000);

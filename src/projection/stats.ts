@@ -60,7 +60,7 @@ function visible(row: StatsRow) {
 export async function replayPages(state: StatsState, pages: readonly Uint8Array[], engine: HeadlessEngine, id: string) {
   return replayDecoded(state, decodePages(state, pages), engine, id);
 }
-async function replayDecoded(state: StatsState, decoded: ReturnType<typeof decodePages>, engine: HeadlessEngine, id: string, snapshots?: { interval: number; write: () => Promise<void> }) {
+async function replayDecoded(state: StatsState, decoded: ReturnType<typeof decodePages>, engine: HeadlessEngine, id: string, snapshots?: { interval: number; write: (at: number) => Promise<void> }) {
   let next: StatsState = { ...state, header: decoded.header, tail: decoded.tail };
   const rows: StatsRow[] = [];
   const publish = () => {
@@ -75,7 +75,7 @@ async function replayDecoded(state: StatsState, decoded: ReturnType<typeof decod
   for (let at = 0; at < decoded.frames.length; at += 9) {
     const valid = engine.step(decoded.frames.subarray(at, at + 9));
     next = accumulate(next, engine.stats(), valid, id); publish();
-    if (snapshots && next.tic % snapshots.interval === 0) await snapshots.write();
+    if (snapshots && next.tic % snapshots.interval === 0) await snapshots.write(at + 9);
   }
   return { state: next, rows };
 }
@@ -88,14 +88,28 @@ function engineAt(id: string, state: StatsState) {
     if (engine) engine.reset(state.header);
     else engine = yield* Effect.promise(() => engines.create(state.header!));
     const rebuilt = engine;
-    let decoder: Pick<StatsState, "header" | "tail"> = { header: null, tail: [] };
-    if (state.tic) {
-      yield* (yield* Sessions).read({ id }).pipe(
+    const snapshot = (yield* SnapshotTable).latest(id, state.tic);
+    if (snapshot) {
+      yield* Effect.sync(() => rebuilt.restore(snapshot.bytes));
+      if (rebuilt.tic !== snapshot.tic) throw new Error("Snapshot table tic mismatch");
+    }
+    let decoder: Pick<StatsState, "header" | "tail"> = { header: snapshot?.resume ? state.header : null, tail: [] };
+    let frameTic = snapshot?.resume ? snapshot.tic : 0;
+    const replay = (pages: readonly Uint8Array[]) => {
+      const parsed = decodePages(decoder, pages); decoder = parsed;
+      for (let at = 0; at < parsed.frames.length && rebuilt.tic < state.tic; at += 9) {
+        // Older persisted snapshots lack recovery cursors. Discard their prefix
+        // without stepping the restored engine; new rows never read that prefix.
+        if (frameTic++ < rebuilt.tic) continue;
+        rebuilt.step(parsed.frames.subarray(at, at + 9));
+      }
+    };
+    if (snapshot?.resume) replay([snapshot.resume.frames]);
+    if (rebuilt.tic < state.tic) {
+      yield* (yield* Sessions).read({ id }, snapshot?.resume ? { offset: snapshot.resume.offset } : undefined).pipe(
         Stream.takeUntil(() => rebuilt.tic >= state.tic),
         Stream.runForEach(batch => Effect.sync(() => {
-          const parsed = decodePages(decoder, batch.items); decoder = parsed;
-          for (let at = 0; at < parsed.frames.length && rebuilt.tic < state.tic; at += 9)
-            rebuilt.step(parsed.frames.subarray(at, at + 9));
+          replay(batch.items);
         })),
       );
     }
@@ -126,8 +140,12 @@ export function makeReplayStats({ snapshotInterval = SNAPSHOT_INTERVAL } = {}) {
       }
       const next = yield* Effect.promise(() => replayDecoded(state, decoded, engine, unit.params.id, {
         interval: snapshotInterval,
-        write: async () => {
-          try { table.write(unit.params.id, engine.tic, await engine.snapshot(), expiry); }
+        // HTTP inputs expose only page cursors. Keep the already-read suffix
+        // beside that opaque cursor, including any incomplete final frame.
+        write: async at => {
+          try { table.write(unit.params.id, engine.tic, await engine.snapshot(), expiry, {
+            offset: batch.frames.nextOffset, frames: concat([decoded.frames.subarray(at), new Uint8Array(decoded.tail)]),
+          }); }
           catch (error) { if (!(error instanceof Error && error.message.startsWith("Snapshot too large:"))) throw error; }
         },
       }));
