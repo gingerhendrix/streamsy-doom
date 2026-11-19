@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { startHost } from "../../apps/host-bun/host";
+import { snapshotDatabase, startHost } from "../../apps/host-bun/host";
 import { ProtocolClient, createSession, forkSession, familyOf, sessionPath, batchPath, indexPath, snapshotPath, deleteSession, Lobby, SnapshotStore, concat } from "../../src/streams";
 import { testScratch } from "../helpers/scratch";
 import { snapshotEntries } from "../helpers/snapshots";
@@ -108,7 +108,8 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
     for (let n = 0; n < 100; n++) {
       const rows = await client.json<{ key: string; value: { score: { tic: number }; live: boolean } }>("doom/v2/leaderboard");
       const row = rows.filter(row => row.key === parent.row.id).at(-1)?.value;
-      if (row?.score?.tic === 350) { expect(row.live).toBe(true); break; }
+      // Stats and presence come from separate projections, so either can land first.
+      if (row?.score?.tic === 350 && row.live) break;
       if (n === 99) throw new Error("Bun replay did not resume after idle eviction");
       await Bun.sleep(10);
     }
@@ -130,7 +131,7 @@ test("Bun snapshot table persists beside streams, expires rows and clears them w
     await host.stop(); host = await startHost({ port: 0, database, snapshotInterval: 175 }); client = new ProtocolClient(host.url);
     expect(await new SnapshotStore(client, writer.row.id).entries()).toEqual(entries);
     expect(await new SnapshotStore(client, writer.row.id).load(entries[0])).toEqual(original);
-    sql = new Database(database);
+    sql = new Database(snapshotDatabase(database));
     sql.query("UPDATE server_snapshots SET expires_at = 0 WHERE id = ?").run(writer.row.id);
     expect(await new SnapshotStore(client, writer.row.id).entries()).toEqual([]);
     expect((await fetch(new URL(snapshotPath(writer.row.id, 175), host.url))).status).toBe(404);

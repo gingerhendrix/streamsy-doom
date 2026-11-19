@@ -27,19 +27,24 @@ export const exposedHeaders = [
   "Stream-TTL", "Stream-Expires-At", "Stream-Forked-From", "Stream-Fork-Offset",
   "Stream-Fork-Sub-Offset", "stream-sse-data-encoding", "ETag", "Location", "Content-Type",
 ];
+export const snapshotDatabase = (filename: string) => filename === ":memory:" ? filename : `${filename.replace(/\.sqlite$/, "")}.snapshots.sqlite`;
 export async function startHost(options: {
   port?: number; hostname?: string; database?: string; staticDirectory?: string; longPollTimeoutMs?: number;
   wadPath?: string; snapshotInterval?: number;
   onRequest?: (request: Request, response: Response) => void;
 } = {}) {
-  const database = new Database(options.database ?? "doom.sqlite", { create: true });
+  const filename = options.database ?? "doom.sqlite";
+  // The engine projection writes snapshots inside its storage transaction. A
+  // second connection to the stream database would hit that write lock, so Bun
+  // keeps snapshots in a sibling file. ":memory:" databases are already separate.
+  const database = new Database(snapshotDatabase(filename), { create: true });
   const snapshots = snapshotTable({
     run: (query, values) => { database.query(query).run(...values); },
     all: <A>(query: string, values: SqlValue[]) => database.query(query).all(...values) as A[],
   }, true);
   const replayStats = makeReplayStats({ snapshotInterval: options.snapshotInterval });
   const protocol = BunStorage.layerProtocol({
-    client: { filename: options.database ?? "doom.sqlite" }, longPollTimeoutMs: options.longPollTimeoutMs ?? 20_000,
+    client: { filename }, longPollTimeoutMs: options.longPollTimeoutMs ?? 20_000,
   });
   const storage = stateTableMigration.pipe(
     Layer.provideMerge(Layer.merge(CheckpointStore.layer, Transaction.layer)),

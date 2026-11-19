@@ -690,31 +690,6 @@ test("workerd: engine transaction spike rolls snapshot, stats and checkpoint bac
   } finally { await h.stop(); }
 }, 30000);
 
-test("workerd: transaction spike cannot resume a persisted producer pin on upgrade", async () => {
-  const h = await harness(100), log = await recording(175);
-  try {
-    const writer = await createSession(h.client, { playerName: "Pending producer upgrade", identity: log.identity });
-    const id = writer.row.id, replay = await h.stub("REPLAYS", `replay:${id}`);
-    const checkpoint = async () => await (await replay.fetch("https://internal/__test/checkpoint")).json() as { state: string; pending?: unknown };
-    await writer.append(log.frames.slice(0, 50)); await h.score(id, 50, false);
-    await replay.fetch("https://internal/__test/fail-checkpoint", { method: "POST" });
-    await writer.append(log.frames.slice(50));
-    await until(async () => {
-      const record = await checkpoint();
-      const snapshots = await (await replay.fetch("https://internal/__test/snapshots")).json() as unknown[];
-      return record.pending && snapshots.length === 1 ? true : undefined;
-    }, "producer pin before failed checkpoint");
-    await Bun.sleep(50);
-    const before = await checkpoint();
-    expect(JSON.parse(before.state).tic).toBe(50);
-    expect(before.pending).toBeDefined();
-    const result = await (await replay.fetch("https://internal/__test/transaction-unit", { method: "POST" })).json() as { failure: string };
-    expect(result.failure).toContain("Commit transaction cannot resume a pinned unit");
-    expect(await checkpoint()).toEqual(before);
-    console.log("MEASURED workerd transaction upgrade gap: Streamsy 0.12.0 rejects an existing pending producer checkpoint with 'Commit transaction cannot resume a pinned unit'; production keeps Commit.producer");
-  } finally { await h.stop(); }
-}, 30000);
-
 test("workerd: sibling frame wakes overlap at concurrency 8 versus the serial default", async () => {
   const measure = async (serial: boolean) => {
     const h = await harness(undefined, serial);

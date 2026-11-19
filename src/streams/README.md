@@ -82,7 +82,7 @@ trigger, and reads the family's bytes remotely. The deterministic stats projecti
 retains an unfinished header/frame and cumulative counters in its checkpoint. It
 replays the engine, accumulates kills/items/secrets across resets and alive→dead
 transitions, and publishes health, armor, level totals, episode/map, weapon/ammo,
-`alive`, `verified` and `tic` into Game. RNG drift is sticky; transport failures retain the retry path. Engine projection `doom-v2-replay` uses `Commit.producer`, with a local output. Renaming the previous `doom-v2-replay-stats` identity causes existing live games to replay from zero after rollout; existing snapshot inserts remain idempotent.
+`alive`, `verified` and `tic` into Game. RNG drift is sticky; transport failures retain the retry path. Engine projection `doom-v2-replay` uses `Commit.transaction`: the handler, the snapshot write, the Game append and the checkpoint commit in one SQLite transaction, so a failure rolls all four back. Renaming the previous `doom-v2-replay-stats` identity causes existing live games to replay from zero after rollout; existing snapshot inserts remain idempotent.
 
 Stats emit on visible changes or a 175-tic bucket, retaining qualifying tics inside each engine unit. `replayIdle` alone writes Game presence: input sets `live: true`, and after 30 seconds without input the timer waits for the engine checkpoint to settle, sets false and releases the engine. Its in-memory presence flag can cause one redundant true after eviction. An engine cache miss restores the newest unexpired server snapshot at or below the checkpoint tic, validates build/WAD/settings, and replays the remainder. Without a snapshot it replays from zero. Forks include inherited stats.
 
@@ -161,9 +161,10 @@ be forked via this API. `writer.end()` calls the server to mark the Game session
 close the binary stream.
 
 The replay owns `server_snapshots(tic PRIMARY KEY, size, expires_at, bytes BLOB)`.
-Bun uses the same table with `(id, tic)` as the key. Nullable `resume_offset` and `resume_frames` columns migrate existing tables. New snapshots retain the input page cursor and the already-read suffix after their tic, including a partial trailing frame. Recovery consumes that suffix and reads only after the opaque cursor. Legacy rows without these columns populated restore their engine but must download and discard the earlier frames; snapshot bytes and public endpoints remain unchanged. The suffix adds at most the remainder of an input page per snapshot. The replay projection writes
-through `SnapshotTable` using `INSERT OR IGNORE`; a write that precedes a failed
-producer checkpoint is safe to repeat. Snapshots are gzip of the identity/tic JSON
+Bun uses the same table with `(id, tic)` as the key, in a sibling `<name>.snapshots.sqlite` file. A second connection to the stream database would block on the engine transaction's write lock. Nullable `resume_offset` and `resume_frames` columns migrate existing tables. New snapshots retain the input page cursor and the already-read suffix after their tic, including a partial trailing frame. Recovery consumes that suffix and reads only after the opaque cursor. Legacy rows without these columns populated restore their engine but must download and discard the earlier frames; snapshot bytes and public endpoints remain unchanged. The suffix adds at most the remainder of an input page per snapshot. The replay projection writes
+through `SnapshotTable`. On Cloudflare the write is inside the engine transaction,
+so a failed checkpoint also removes the snapshot row. On Bun the snapshot file is
+outside it, and `INSERT OR IGNORE` makes the retried write safe. Snapshots are gzip of the identity/tic JSON
 line followed by the heap XOR the post-init baseline, preserving browser restore
 compatibility. Native compression consumes 64 KiB XOR chunks without allocating
 a second 16 MiB delta. The retained post-init baseline adds 16 MiB per engine.
@@ -201,4 +202,4 @@ per-game expiry removes derived entries through `lobbyEntry`.
 
 The family `frameWake` attachment uses concurrency 8. Sibling bindings can overlap replay-object delivery waits while each binding still processes its units in order. Local workerd tests compare it with concurrency 1 under a controlled response delay.
 
-Production retains `Commit.producer` because a transaction Commit cannot resume a persisted producer pin in Streamsy 0.12.0. No checkpoint reset or projection identity change is applied.
+The engine moved from `Commit.producer` to `Commit.transaction` without a new projection identity. Streamsy 0.12.0 refuses to run `Commit.transaction` on a record that holds a producer pin ("cannot resume a pinned unit"). Deployments that ran the producer version must start from empty Durable Object storage. The test stage was destroyed and redeployed for this change.

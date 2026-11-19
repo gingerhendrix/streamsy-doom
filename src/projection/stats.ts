@@ -122,7 +122,7 @@ export function makeReplayStats({ snapshotInterval = SNAPSHOT_INTERVAL } = {}) {
   if (!Number.isInteger(snapshotInterval) || snapshotInterval < 1) throw new Error("Invalid snapshot interval");
   return Projection.mapAccumBatch({
     id: "doom-v2-replay", params: { id: SessionId }, inputs: { frames: Sessions }, outputs: { game: Game },
-    commit: Commit.producer, state: { schema: StatsState, initial: initialStats },
+    commit: Commit.transaction, state: { schema: StatsState, initial: initialStats },
     mapAccumBatch: (state, batch, unit) => Effect.gen(function* () {
       const empty = [] as ReturnType<typeof DurableState.upsert<"stats", StatsRow>>[];
       if (batch.frames.gone) return [state, { game: empty }] as const;
