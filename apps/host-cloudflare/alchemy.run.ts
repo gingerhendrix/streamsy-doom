@@ -31,6 +31,7 @@ export default Alchemy.Stack(
       bundle: false,
       compatibility: { date: "2026-07-30", flags: ["nodejs_compat"] },
       workersDev: stage !== "prod",
+      ...(stage === "prod" ? { domain: "doom.streamsy.dev" } : {}),
       assets: { directory: pathBesideThisFile("./dist/assets"), runWorkerFirst: true },
       env: {
         STREAMS: RetiredStreamsKeptForItsDeployedState,
