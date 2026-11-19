@@ -3,13 +3,13 @@
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import { Cause, Effect, Exit, Layer, Option } from "effect";
 import { CheckpointStore, Commit, Projection, Transaction } from "@streamsy/projection";
-import { makeReplayStats, replayStats } from "../../src/projection/stats";
-import { ReplayEngines } from "../../src/projection/engines";
-import { SnapshotTable } from "../../src/projection/snapshots";
+import { makeReplayStats, replayStats } from "../../src/projection/replay/projection";
+import { ReplayEngines } from "../../src/projection/replay/engines";
+import { SnapshotTable } from "../../src/storage/snapshot-table";
 import { framesLink } from "../../apps/host-cloudflare/topology";
 import { Streamsy } from "@streamsy/core";
 import { DurableObjectStorage } from "@streamsy/storage/durable-object";
-import { Game, ReplayWake, type StatsRow } from "../../src/streams/v2";
+import { Game, ReplayWake, type StatsRow } from "../../src/streams/declarations";
 import worker, {
   gamesHost,
   DoomReplay as Replay,
@@ -224,14 +224,12 @@ export class DoomReplay extends Replay {
         Effect.gen(function* () {
           const game = yield* Game;
           for (let at = 0; at < rows.length; at += 500) {
-            const events = rows
-              .slice(at, at + 500)
-              .map((value) => ({
-                type: "stats" as const,
-                key: id,
-                value,
-                headers: { operation: "upsert" as const },
-              }));
+            const events = rows.slice(at, at + 500).map((value) => ({
+              type: "stats" as const,
+              key: id,
+              value,
+              headers: { operation: "upsert" as const },
+            }));
             if (events.length) yield* game.append({ id }, [events[0], ...events.slice(1)]);
           }
         }).pipe(

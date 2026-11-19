@@ -8,7 +8,7 @@ import {
   familyOf,
   sessionPath,
   batchPath,
-  indexPath,
+  snapshotIndexPath,
   snapshotPath,
   deleteSession,
   Lobby,
@@ -37,7 +37,12 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
       valid.replace("_", "-"),
       "../escape",
     ]) {
-      for (const path of [sessionPath, batchPath, indexPath, (id: string) => snapshotPath(id, 1)])
+      for (const path of [
+        sessionPath,
+        batchPath,
+        snapshotIndexPath,
+        (id: string) => snapshotPath(id, 1),
+      ])
         expect(() => path(id)).toThrow("Invalid v2");
       await expect(createSession(client, { id, playerName: "Bad", identity })).rejects.toThrow(
         "Invalid v2",
@@ -84,7 +89,7 @@ test("Bun v2 API: local projection, exact IDs, read-only scores and reserved mou
     }
     expect(rows.filter((r: any) => r.type === "stats").at(-1)?.value.tic).toBe(175);
     await snapshotEntries(client, writer.row.id, [175]);
-    for (const path of [indexPath(writer.row.id), snapshotPath(writer.row.id, 175)]) {
+    for (const path of [snapshotIndexPath(writer.row.id), snapshotPath(writer.row.id, 175)]) {
       for (const method of ["PUT", "POST", "DELETE", "PATCH", "OPTIONS"])
         expect((await fetch(new URL(path, host.url), { method })).status).toBe(405);
       const head = await client.request(path, { method: "HEAD" });
@@ -174,7 +179,7 @@ test("Bun absolute-expiry sessions, forks and wakes leave the shared family/repl
     await Bun.sleep(30_000);
     const idleRows = await client.json<{
       key: string;
-      value: import("../../src/streams/v2").EntryRow;
+      value: import("../../src/streams/declarations").EntryRow;
     }>("doom/v2/leaderboard");
     expect(idleRows.filter((row) => row.key === parent.row.id).at(-1)?.value).toMatchObject({
       live: false,

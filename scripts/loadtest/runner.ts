@@ -17,7 +17,7 @@ import {
   type FollowOptions,
 } from "../../src/streams";
 import { StateRows } from "../../src/streams/state";
-import type { StatsRow, EntryRow, PresenceRow, GameEvent } from "../../src/streams/v2";
+import type { StatsRow, EntryRow, PresenceRow, GameEvent } from "../../src/streams/declarations";
 import { serverEngine } from "../../apps/host-bun/engine";
 import type { Recording } from "./recording";
 export const scenarios = ["families", "siblings", "lineage", "cold", "lobby"] as const;

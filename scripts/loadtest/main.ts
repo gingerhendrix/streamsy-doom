@@ -12,7 +12,7 @@ import {
   type Scenario,
 } from "./runner";
 import { prepareRecording } from "./recording";
-import { ProtocolClient, isFamilyId, Lobby } from "../../src/streams";
+import { ProtocolClient, isSessionId, Lobby } from "../../src/streams";
 const { values } = parseArgs({
   args: process.argv.slice(2).filter((arg) => arg !== "--"),
   strict: true,
@@ -45,7 +45,7 @@ if (values.cleanup) {
     result.version !== 1 ||
     !/^load-(families|siblings|lineage|cold|lobby)-[0-9a-f-]{36}$/.test(result.run) ||
     result.options.target !== target ||
-    !result.ids.every(isFamilyId)
+    !result.ids.every(isSessionId)
   )
     throw new Error("Invalid cleanup journal or target mismatch");
   const deadline = AbortSignal.timeout(60000);

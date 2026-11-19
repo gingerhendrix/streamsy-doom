@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { DurableState } from "@streamsy/core";
 import { Commit, Projection } from "@streamsy/projection";
-import { Effect, Schema, Schedule, Duration } from "effect";
+import { Duration, Effect, Schedule, Schema } from "effect";
 import {
-  Game,
   Entries,
+  Game,
   SessionId,
   SessionRowSchema,
   SummarySchema,
-  type StatsRow,
   type EntryRow,
   type GameEvent,
-} from "../streams/v2";
+  type StatsRow,
+} from "../streams/declarations";
+import { publishIntervalOf } from "./publish-interval";
+
 export const EntryState = Schema.Struct({
   session: Schema.NullOr(SessionRowSchema),
   score: Schema.NullOr(SummarySchema),
@@ -20,6 +22,7 @@ export const EntryState = Schema.Struct({
   bucket: Schema.Number,
 });
 export type EntryState = typeof EntryState.Type;
+
 export const initialEntry = (): EntryState => ({
   session: null,
   score: null,
@@ -27,83 +30,106 @@ export const initialEntry = (): EntryState => ({
   published: "",
   bucket: -1,
 });
-/** Fold the whole unit, coalescing it to at most one lobby change. */
+
+interface FoldedEntry {
+  session: EntryState["session"];
+  score: EntryState["score"];
+  live: boolean;
+  publishWithoutWaiting: boolean;
+}
+
+const summaryOf = (stats: StatsRow): NonNullable<EntryState["score"]> => ({
+  tic: stats.tic,
+  episode: stats.episode,
+  map: stats.map,
+  kills: stats.kills,
+  deaths: stats.deaths,
+  items: stats.items,
+  secrets: stats.secrets,
+  alive: stats.alive,
+  verified: stats.verified,
+});
+
+function foldSessionEvent(entry: FoldedEntry, event: GameEvent) {
+  if (event.headers.operation === "delete") entry.session = null;
+  else if (event.value)
+    entry.session = { ...entry.session, ...event.value } as NonNullable<EntryState["session"]>;
+  entry.publishWithoutWaiting = true;
+}
+
+function foldPresenceEvent(entry: FoldedEntry, presence: NonNullable<GameEvent["value"]>) {
+  if (typeof presence.live !== "boolean") return;
+  if (presence.live !== entry.live) entry.publishWithoutWaiting = true;
+  entry.live = presence.live;
+}
+
+function foldGameEvent(entry: FoldedEntry, event: GameEvent, id: string) {
+  if (event.headers.control === "reset") {
+    entry.session = null;
+    entry.score = null;
+    entry.live = false;
+    entry.publishWithoutWaiting = true;
+  }
+  if (event.key !== id) return;
+  if (event.type === "session") foldSessionEvent(entry, event);
+  else if (event.type === "presence" && event.value) foldPresenceEvent(entry, event.value);
+  else if (event.type === "stats" && event.value) entry.score = summaryOf(event.value as StatsRow);
+}
+
 export function entryBatch(
   state: EntryState,
   events: readonly GameEvent[],
   id: string,
   gone = false,
 ) {
-  let { session, score, live } = state,
-    immediate = gone;
-  for (const event of events) {
-    if (event.headers.control === "reset") {
-      session = null;
-      score = null;
-      live = false;
-      immediate = true;
-    }
-    if (event.key !== id) continue;
-    if (event.type === "session") {
-      session =
-        event.headers.operation === "delete"
-          ? null
-          : event.value
-            ? ({ ...session, ...event.value } as NonNullable<typeof session>)
-            : session;
-      immediate = true;
-    } else if (event.type === "presence" && event.value) {
-      if (typeof event.value.live !== "boolean") continue;
-      if (event.value.live !== live) immediate = true;
-      live = event.value.live;
-    } else if (event.type === "stats" && event.value) {
-      const row = event.value as StatsRow;
-      score = {
-        tic: row.tic,
-        episode: row.episode,
-        map: row.map,
-        kills: row.kills,
-        deaths: row.deaths,
-        items: row.items,
-        secrets: row.secrets,
-        alive: row.alive,
-        verified: row.verified,
-      };
-    }
-  }
-  if (gone) session = null;
+  const entry: FoldedEntry = {
+    session: state.session,
+    score: state.score,
+    live: state.live,
+    publishWithoutWaiting: gone,
+  };
+  for (const event of events) foldGameEvent(entry, event, id);
+  if (gone) entry.session = null;
+
+  const { session, score, live } = entry;
   const row: EntryRow | null = session ? { ...session, score, live } : null;
-  // Tic makes bucket-boundary heartbeats visible even when the player stands still.
-  const published = JSON.stringify(row);
-  const bucket = Math.floor((score?.tic ?? 0) / 175);
-  const emit =
-    published !== state.published &&
-    (immediate || !state.published || (!state.score && score !== null) || bucket > state.bucket);
-  const next = {
+  const serializedRow = JSON.stringify(row);
+  const publishInterval = publishIntervalOf(score?.tic ?? 0);
+
+  const rowChanged = serializedRow !== state.published;
+  const neverPublished = !state.published;
+  const isFirstScore = !state.score && score !== null;
+  const enteredNextPublishInterval = publishInterval > state.bucket;
+  const publish =
+    rowChanged &&
+    (entry.publishWithoutWaiting || neverPublished || isFirstScore || enteredNextPublishInterval);
+
+  const next: EntryState = {
     session,
     score,
     live,
-    published: emit ? published : state.published,
-    bucket: emit ? bucket : state.bucket,
+    published: publish ? serializedRow : state.published,
+    bucket: publish ? publishInterval : state.bucket,
   };
-  const rows = emit
-    ? [row ? DurableState.upsert("entry", row) : DurableState.remove("entry", id)]
-    : [];
-  return { state: next, rows };
+  const publishedChange = row
+    ? DurableState.upsert("entry", row)
+    : DurableState.remove("entry", id);
+  return { state: next, rows: publish ? [publishedChange] : [] };
 }
+
+const exponentialBackoffCappedAtThirtySeconds = Schedule.exponential("1 second").pipe(
+  Schedule.modifyDelay(({ duration }) =>
+    Effect.succeed(Duration.min(duration, Duration.seconds(30))),
+  ),
+);
+
 export const lobbyEntry = Projection.mapAccumBatch({
   id: "doom-v2-lobby-entry",
   params: { id: SessionId },
   inputs: { game: Game },
   outputs: { entries: Entries },
   commit: Commit.producer,
-  retry: {
-    schedule: Schedule.exponential("1 second").pipe(
-      Schedule.modifyDelay(({ duration }) =>
-        Effect.succeed(Duration.min(duration, Duration.seconds(30))),
-      ),
-    ),
-  },
+  retry: { schedule: exponentialBackoffCappedAtThirtySeconds },
   state: { schema: EntryState, initial: initialEntry },
   mapAccumBatch: (state, batch, unit) =>
     Effect.sync(() => {

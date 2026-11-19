@@ -1,55 +1,65 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Keep time debt across paints; cap one paint's work without dropping game tics.
+import { TICS_PER_SECOND } from "../../src/streams/frames";
+
+const MS_PER_TIC = 1000 / TICS_PER_SECOND;
+const MAX_TICS_PER_PAINT = 8;
+
 export class FixedStep {
-  private previous?: number;
-  private debt = 0;
+  private previousPaint?: number;
+  private unsteppedMs = 0;
+
   advance(now: number, step: () => void) {
-    if (this.previous !== undefined) this.debt += now - this.previous;
-    this.previous = now;
-    let count = 0;
-    while (this.debt >= 1000 / 35 && count++ < 8) {
+    if (this.previousPaint !== undefined) this.unsteppedMs += now - this.previousPaint;
+    this.previousPaint = now;
+    for (let steps = 0; this.unsteppedMs >= MS_PER_TIC && steps < MAX_TICS_PER_PAINT; steps++) {
       step();
-      this.debt -= 1000 / 35;
+      this.unsteppedMs -= MS_PER_TIC;
     }
   }
+
   pause() {
-    this.previous = undefined;
-    this.debt = 0;
+    this.previousPaint = undefined;
+    this.unsteppedMs = 0;
   }
 }
-// One serialized drain includes frame POST and manifest.
-// Fail closed: never retry an ambiguous append or run later work after failure.
+
 export class FrameQueue {
   private frames: Uint8Array[] = [];
-  private running?: Promise<void>;
+  private drainInProgress?: Promise<void>;
   error?: unknown;
   latency = 0;
   pending = 0;
+
   constructor(private readonly persist: (frames: Uint8Array[]) => Promise<void>) {}
+
   push(frame: Uint8Array) {
     this.frames.push(frame);
     this.pending++;
   }
+
   flush(): Promise<void> {
     if (this.error) return Promise.reject(this.error);
-    if (this.running) return this.running;
-    this.running = this.drain()
+    return (this.drainInProgress ??= this.drainUntilEmptyOrFirstFailure());
+  }
+
+  private drainUntilEmptyOrFirstFailure() {
+    return this.drain()
       .catch((error) => {
         this.error = error;
         throw error;
       })
       .finally(() => {
-        this.running = undefined;
+        this.drainInProgress = undefined;
       });
-    return this.running;
   }
+
   private async drain() {
     while (this.frames.length) {
-      const frames = this.frames.splice(0),
-        start = performance.now();
+      const frames = this.frames.splice(0);
+      const started = performance.now();
       await this.persist(frames);
       this.pending -= frames.length;
-      this.latency = performance.now() - start;
+      this.latency = performance.now() - started;
     }
   }
 }

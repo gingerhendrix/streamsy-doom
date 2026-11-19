@@ -5,7 +5,7 @@ import { testScratch } from "./helpers/scratch";
 import { Miniflare } from "miniflare";
 import { bundleWorker } from "../scripts/bundle-worker";
 import { recording, createHeadless } from "./helpers/recording";
-import { concat } from "../src/streams/protocol";
+import { concat } from "../src/streams/bytes";
 import type { EngineStats } from "../engine/src/engine.js";
 const scratch = await testScratch("engine");
 const log = await recording(22000);

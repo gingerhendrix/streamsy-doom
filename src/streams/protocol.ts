@@ -1,28 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { isFamilyId } from "./ids";
-export const absoluteExpiry = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-export const projectionReadPath = (path: string) =>
-  /^doom\/v2\/(sessions|batches|replay-wake|events)\//.test(path);
-export const binary = "application/octet-stream";
-export const sessionPath = (id: string) => `doom/v2/sessions/${validId(id)}`;
-export const batchPath = (id: string) => `doom/v2/batches/${validId(id)}`;
-export const indexPath = (id: string) => `doom/v2/server-snapshots/${validId(id)}`;
-export const snapshotPath = (id: string, tic: number) =>
-  `doom/v2/server-snapshots/${validId(id)}/${uint32(tic)}`;
-export function validId(id: string) {
-  if (!isFamilyId(id)) throw new Error("Invalid v2 session id");
-  return id;
+import { concat, parseJsonArray } from "./bytes";
+import { expiryHeadersThatProjectionReadsCannotExtend } from "./expiry";
+
+export const BINARY = "application/octet-stream";
+export const JSON_CONTENT = "application/json";
+export const STREAM_START = "-1";
+
+const REVALIDATE_GROWING_STREAM = "no-cache";
+
+type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export interface ReadBatch {
+  bytes: Uint8Array;
+  offset: string;
+  upToDate: boolean;
+  closed: boolean;
+  cursor?: string;
 }
-export function uint32(value: number) {
-  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new Error("Expected u32");
-  return value;
-}
-export const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value) + "\n");
+
 export const offsetOf = (response: Response) => {
-  const value = response.headers.get("Stream-Next-Offset");
-  if (!value) throw new Error("Missing Stream-Next-Offset");
-  return value;
+  const offset = response.headers.get("Stream-Next-Offset");
+  if (!offset) throw new Error("Missing Stream-Next-Offset");
+  return offset;
 };
+
 export class ProtocolError extends Error {
   constructor(
     message: string,
@@ -31,62 +32,70 @@ export class ProtocolError extends Error {
     super(message);
   }
 }
+
 export class ProtocolClient {
   constructor(
     readonly baseUrl: string,
-    readonly fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = (
-      input,
-      init,
-    ) => fetch(input, init),
+    readonly fetcher: Fetcher = (input, init) => fetch(input, init),
   ) {}
+
+  private resolve(path: string) {
+    const directory = this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/";
+    return new URL(path, directory);
+  }
+
   async request(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
-    // Revalidate all growing streams, including first reads and repeated long polls.
-    headers.set("Cache-Control", "no-cache");
-    const response = await this.fetcher(
-      new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"),
-      {
-        ...init,
-        headers,
-        cache: "no-store",
-      },
-    );
-    if (!response.ok)
-      throw new ProtocolError(
-        `${init.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`,
-        response.status,
-      );
+    headers.set("Cache-Control", REVALIDATE_GROWING_STREAM);
+    const response = await this.fetcher(this.resolve(path), {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const method = init.method ?? "GET";
+      const detail = await response.text();
+      throw new ProtocolError(`${method} ${path}: ${response.status} ${detail}`, response.status);
+    }
     return response;
   }
+
   async create(
     path: string,
     body: Uint8Array | string,
-    type = binary,
-    ttl = 43200,
-    extra: Record<string, string> = {},
+    options: { contentType?: string; headers?: Record<string, string> } = {},
   ) {
-    const expiry: Record<string, string> = projectionReadPath(path)
-      ? { "Stream-Expires-At": absoluteExpiry() }
-      : { "Stream-TTL": String(ttl) };
     return this.request(path, {
       method: "PUT",
-      headers: { "Content-Type": type, ...expiry, ...extra },
+      headers: {
+        "Content-Type": options.contentType ?? BINARY,
+        ...expiryHeadersThatProjectionReadsCannotExtend(path),
+        ...options.headers,
+      },
       body: body as BodyInit,
     });
   }
+
   async append(
     path: string,
     body: Uint8Array | string,
-    type = binary,
-    extra: Record<string, string> = {},
+    contentType = BINARY,
+    headers: Record<string, string> = {},
   ) {
     return this.request(path, {
       method: "POST",
-      headers: { "Content-Type": type, ...extra },
+      headers: { "Content-Type": contentType, ...headers },
       body: body as BodyInit,
     });
   }
-  async read(path: string, offset = "-1", live = false, signal?: AbortSignal, cursor?: string) {
+
+  async read(
+    path: string,
+    offset = STREAM_START,
+    live = false,
+    signal?: AbortSignal,
+    cursor?: string,
+  ): Promise<ReadBatch> {
     const query = new URLSearchParams({ offset });
     if (live) query.set("live", "long-poll");
     if (cursor) query.set("cursor", cursor);
@@ -99,47 +108,33 @@ export class ProtocolClient {
       cursor: response.headers.get("Stream-Cursor") ?? undefined,
     };
   }
+
+  private async *pagesUntilUpToDate(path: string) {
+    let offset = STREAM_START;
+    while (true) {
+      const page = await this.read(path, offset);
+      yield page.bytes;
+      if (page.upToDate) return;
+      if (page.offset === offset) throw new Error("Read made no progress");
+      offset = page.offset;
+    }
+  }
+
   async all(path: string) {
-    let offset = "-1";
-    const chunks: Uint8Array[] = [];
-    do {
-      const batch = await this.read(path, offset);
-      chunks.push(batch.bytes);
-      if (batch.upToDate) break;
-      if (batch.offset === offset) throw new Error("Read made no progress");
-      offset = batch.offset;
-    } while (true);
-    return concat(chunks);
+    const pages: Uint8Array[] = [];
+    for await (const page of this.pagesUntilUpToDate(path)) pages.push(page);
+    return concat(pages);
   }
+
   async json<T>(path: string): Promise<T[]> {
-    const result: T[] = [];
-    let offset = "-1";
-    do {
-      const batch = await this.read(path, offset);
-      // Each HTTP response is its own JSON array, including paginated reads.
-      const parsed = JSON.parse(new TextDecoder().decode(batch.bytes) || "[]");
-      if (!Array.isArray(parsed)) throw new Error("Expected JSON stream array");
-      result.push(...(parsed as T[]));
-      if (batch.upToDate) return result;
-      if (batch.offset === offset) throw new Error("Read made no progress");
-      offset = batch.offset;
-    } while (true);
+    const events: T[] = [];
+    for await (const page of this.pagesUntilUpToDate(path)) events.push(...parseJsonArray<T>(page));
+    return events;
   }
+
   async remove(path: string) {
-    const response = await this.fetcher(
-      new URL(path, this.baseUrl.endsWith("/") ? this.baseUrl : this.baseUrl + "/"),
-      { method: "DELETE" },
-    );
-    if (!response.ok && response.status !== 404)
-      throw new Error(`DELETE ${path}: ${response.status}`);
+    const response = await this.fetcher(this.resolve(path), { method: "DELETE" });
+    const alreadyRemoved = response.status === 404;
+    if (!response.ok && !alreadyRemoved) throw new Error(`DELETE ${path}: ${response.status}`);
   }
-}
-export function concat(parts: Uint8Array[]) {
-  const result = new Uint8Array(parts.reduce((size, p) => size + p.length, 0));
-  let at = 0;
-  for (const p of parts) {
-    result.set(p, at);
-    at += p.length;
-  }
-  return result;
 }

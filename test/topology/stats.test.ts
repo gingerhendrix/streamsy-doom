@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { expect, test } from "bun:test";
-import { initialStats, replayPages, accumulate } from "../../src/projection/stats";
-import { concat, encode } from "../../src/streams/protocol";
+import { replayPages } from "../../src/projection/replay/replay-frames";
+import { accumulate } from "../../src/projection/replay/score";
+import { initialReplayState } from "../../src/projection/replay/state";
+import { concat, encodeJsonLine } from "../../src/streams/bytes";
 import { createHeadless, recording } from "../helpers/recording";
 const id = "a".repeat(32) + "_" + "b".repeat(32);
 const log = await recording();
-const bytes = concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames]);
+const bytes = concat([encodeJsonLine({ ...log.identity, formatVersion: 1 }), ...log.frames]);
 
 test("headless stats match the browser at every tic, including deaths and restart; reset reuses baseline", async () => {
   const engine = await createHeadless(log.identity);
-  let state = initialStats(),
+  let state = initialReplayState(),
     beforeRestart = 0,
     restarted = false;
   for (let n = 0; n < log.frames.length; n++) {
@@ -40,10 +42,10 @@ test("headless stats match the browser at every tic, including deaths and restar
 
 test("producer row sequence and cumulative checkpoint are independent of byte page and unit size", async () => {
   const engine = await createHeadless(log.identity);
-  const expected = await replayPages(initialStats(), [bytes], engine, id);
+  const expected = await replayPages(initialReplayState(), [bytes], engine, id);
   for (const size of [1, 8, 9, 47, 2048, 65536]) {
     engine.reset(log.identity);
-    let state = initialStats();
+    let state = initialReplayState();
     const rows = [];
     for (let at = 0; at < bytes.length; at += size) {
       const next = await replayPages(state, [bytes.subarray(at, at + size)], engine, id);
@@ -61,7 +63,7 @@ test("RNG drift stays unverified while later frames continue; counters reset on 
   const engine = await createHeadless(log.identity);
   const bad = bytes.slice();
   bad[bad.length - 1] ^= 1;
-  const result = await replayPages(initialStats(), [bad], engine, id);
+  const result = await replayPages(initialReplayState(), [bad], engine, id);
   expect(result.state.row).toMatchObject({ tic: 21000, verified: false, kills: 5, deaths: 2 });
   expect(result.rows.at(-1)?.verified).toBe(false);
   const advanced = accumulate(
@@ -79,10 +81,11 @@ test("RNG drift stays unverified while later frames continue; counters reset on 
 });
 
 test("durable projection identities are pinned", async () => {
-  const { replayStats, replayIdle } = await import("../../src/projection/stats");
+  const { replayStats } = await import("../../src/projection/replay/projection");
+  const { replayIdle } = await import("../../src/projection/replay/idle");
   const { lobbyEntry } = await import("../../src/projection/lobby-entry");
   const { leaderboard } = await import("../../src/projection/leaderboard");
-  const { frameWake } = await import("../../src/projection/wake");
+  const { frameWake } = await import("../../src/projection/frame-wake");
   expect([frameWake.id, replayStats.id, replayIdle.id, lobbyEntry.id, leaderboard.id]).toEqual([
     "doom-v2-frame-wake",
     "doom-v2-replay",
@@ -94,7 +97,7 @@ test("durable projection identities are pinned", async () => {
 test("lobby summary caps stats at 175 tics, flushes session/presence, and deletes on gone", async () => {
   const { entryBatch, initialEntry } = await import("../../src/projection/lobby-entry");
   const { state: engine } = await replayPages(
-    initialStats(),
+    initialReplayState(),
     [bytes],
     await createHeadless(log.identity),
     id,
@@ -196,7 +199,7 @@ test("headless snapshot restore validates identity, heap and tic before replayin
     newline = raw.indexOf(10);
   const metadata = JSON.parse(new TextDecoder().decode(raw.subarray(0, newline)));
   const changed = (fields: object, heap = raw.subarray(newline + 1)) =>
-    gzipSync(concat([encode({ ...metadata, ...fields }), heap]));
+    gzipSync(concat([encodeJsonLine({ ...metadata, ...fields }), heap]));
   const restored = await createHeadless(log.identity);
   for (const key of ["version", "buildId", "wadSha256", "skill", "episode", "map"])
     expect(() => restored.restore(changed({ [key]: "mismatch" }))).toThrow(

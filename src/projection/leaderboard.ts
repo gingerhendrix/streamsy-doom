@@ -1,11 +1,49 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { Commit, Projection } from "@streamsy/projection";
 import { Array, Effect } from "effect";
-import { Entries, Leaderboard, type EntryRow } from "../streams/v2";
-import { EntriesTable, LeaderboardTable } from "../server/state-snapshot";
+import { EntriesTable, LeaderboardTable } from "../storage/state-tables";
+import { Entries, Leaderboard, type EntryRow } from "../streams/declarations";
+import { recentFirst } from "../streams/entry-order";
 
-export const recentFirst = (a: EntryRow, b: EntryRow) =>
-  b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
+export const LEADERBOARD_SIZE = 50;
+
+type EntryEvents = readonly { headers: object }[];
+
+const keysNamedBy = (events: EntryEvents) => [
+  ...new Set(events.flatMap((event) => ("key" in event ? [event.key as string] : []))),
+];
+
+const replacesWholeCollection = (events: EntryEvents) =>
+  events.some(
+    ({ headers }) =>
+      "control" in headers && (headers.control === "reset" || headers.control === "snapshot-end"),
+  );
+
+const newestRows = (rows: Iterable<EntryRow>) =>
+  new Map(
+    [...rows]
+      .sort(recentFirst)
+      .slice(0, LEADERBOARD_SIZE)
+      .map((row) => [row.id, row]),
+  );
+
+const isSameRow = (a: EntryRow | undefined, b: EntryRow) => JSON.stringify(a) === JSON.stringify(b);
+
+function boardChanges(before: Map<string, EntryRow>, after: Map<string, EntryRow>) {
+  const upserts = [...after]
+    .filter(([key, row]) => !isSameRow(before.get(key), row))
+    .map(([key, row]) => ({
+      type: "game" as const,
+      key,
+      value: row,
+      headers: { operation: "upsert" as const },
+    }));
+  const deletes = [...before.keys()]
+    .filter((key) => !after.has(key))
+    .map((key) => ({ type: "game" as const, key, headers: { operation: "delete" as const } }));
+  return [...upserts, ...deletes];
+}
+
 export const leaderboard = Projection.process({
   id: "doom-v2-leaderboard",
   params: {},
@@ -14,58 +52,28 @@ export const leaderboard = Projection.process({
   commit: Commit.transaction,
   process: (batch) =>
     Effect.gen(function* () {
-      const entries = EntriesTable.at({}),
-        board = LeaderboardTable.at({});
-      // Lobby streams have no expiry; a removed input is handled by the runner.
       if (batch.entries.gone) return;
+      const entries = EntriesTable.at({});
+      const board = LeaderboardTable.at({});
       yield* entries.sync();
       yield* board.sync();
-      const keys = [
-        ...new Set(batch.entries.items.flatMap((event) => ("key" in event ? [event.key] : []))),
-      ];
-      const reset = batch.entries.items.some(
-        (event) =>
-          "control" in event.headers &&
-          (event.headers.control === "reset" || event.headers.control === "snapshot-end"),
+
+      const boardBefore = new Map(
+        (yield* board.list("game")).rows.map(({ key, value }) => [key, value]),
       );
-      const current = (yield* board.list("game")).rows;
-      const candidates = new Map(current.map(({ key, value }) => [key, value]));
-      // A reset/snapshot can remove keys not explicitly named in this unit.
-      const changed = reset ? [...new Set([...keys, ...candidates.keys()])] : keys;
-      const { rows } = yield* entries.getMany("entry", changed);
-      for (const key of changed) {
-        const row = rows.get(key);
-        if (row) candidates.set(key, row);
+      const namedKeys = keysNamedBy(batch.entries.items);
+      const keysToRecheck = replacesWholeCollection(batch.entries.items)
+        ? [...new Set([...namedKeys, ...boardBefore.keys()])]
+        : namedKeys;
+      const { rows: currentEntries } = yield* entries.getMany("entry", keysToRecheck);
+
+      const candidates = new Map(boardBefore);
+      for (const key of keysToRecheck) {
+        const entry = currentEntries.get(key);
+        if (entry) candidates.set(key, entry);
         else candidates.delete(key);
       }
-      const kept = new Map(
-        [...candidates.values()]
-          .sort(recentFirst)
-          .slice(0, 50)
-          .map((row) => [row.id, row]),
-      );
-      const before = new Map(current.map(({ key, value }) => [key, value]));
-      const changes = [
-        ...[...kept].flatMap(([key, row]) =>
-          JSON.stringify(before.get(key)) === JSON.stringify(row)
-            ? []
-            : [
-                {
-                  type: "game" as const,
-                  key,
-                  value: row,
-                  headers: { operation: "upsert" as const },
-                },
-              ],
-        ),
-        ...[...before.keys()]
-          .filter((key) => !kept.has(key))
-          .map((key) => ({
-            type: "game" as const,
-            key,
-            headers: { operation: "delete" as const },
-          })),
-      ];
+      const changes = boardChanges(boardBefore, newestRows(candidates.values()));
       if (Array.isReadonlyArrayNonEmpty(changes)) yield* (yield* Leaderboard).append({}, changes);
     }),
 });

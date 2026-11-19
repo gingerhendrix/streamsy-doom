@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { createEngine, keys } from "../../engine/src/engine.js";
 import { serverEngine } from "../../apps/host-bun/engine";
-import { initialStats, replayPages } from "../../src/projection/stats";
-import { encode } from "../../src/streams/protocol";
+import { replayPages } from "../../src/projection/replay/replay-frames";
+import { initialReplayState } from "../../src/projection/replay/state";
+import { encodeJsonLine } from "../../src/streams/bytes";
 import type { Identity } from "../../src/streams/snapshots";
 export interface Recording {
   identity: Identity;
@@ -39,8 +40,8 @@ export async function prepareRecording(count: number): Promise<Recording> {
   }
   const replay = await (await serverEngine())(engine.identity);
   const result = await replayPages(
-    initialStats(),
-    [encode({ ...engine.identity, formatVersion: 1 }), ...frames],
+    initialReplayState(),
+    [encodeJsonLine({ ...engine.identity, formatVersion: 1 }), ...frames],
     replay,
     "recording",
   );

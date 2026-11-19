@@ -11,7 +11,7 @@ import {
   Lobby,
 } from "../../src/streams";
 import { startHost } from "../../apps/host-bun/host";
-import type { SessionMetadata, StatsRow } from "../../src/streams/v2";
+import type { SessionMetadata, StatsRow } from "../../src/streams/declarations";
 import { recording } from "../helpers/recording";
 
 test("both State collections fold upserts, partial updates and deletes independently", () => {

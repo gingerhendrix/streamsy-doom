@@ -8,11 +8,12 @@ import { createEngine } from "../../engine/src/engine.js";
 import { SNAPSHOT_INTERVAL } from "../../src/streams/snapshots";
 import { recording, createHeadless, wad, wasmBinary } from "../helpers/recording";
 import { snapshotEntries, snapshotBytes } from "../helpers/snapshots";
-import { initialStats, replayPages } from "../../src/projection/stats";
-import { concat, encode } from "../../src/streams/protocol";
+import { replayPages } from "../../src/projection/replay/replay-frames";
+import { initialReplayState } from "../../src/projection/replay/state";
+import { concat, encodeJsonLine } from "../../src/streams/bytes";
 import type { StateEvent } from "../../src/streams/state";
 import { idOf, statsOf } from "../helpers/state";
-import type { StatsRow } from "../../src/streams/v2";
+import type { StatsRow } from "../../src/streams/declarations";
 import {
   ProtocolClient,
   createSession,
@@ -22,10 +23,10 @@ import {
   deleteSession,
   sessionPath,
   batchPath,
-  indexPath,
+  snapshotIndexPath,
   snapshotPath,
   familyOf,
-  isFamilyId,
+  isSessionId,
 } from "../../src/streams";
 const scratch = await testScratch("topology");
 const binary = { "Content-Type": "application/octet-stream" };
@@ -159,7 +160,7 @@ test("workerd: family placement, mid-batch/snapshot forks, seeks, delete and acc
   try {
     const parent = await createSession(h.client, { playerName: "Parent", identity });
     const other = await createSession(h.client, { playerName: "Other", identity });
-    expect(isFamilyId(parent.row.id)).toBe(true);
+    expect(isSessionId(parent.row.id)).toBe(true);
     expect(familyOf(parent.row.id)).not.toBe(familyOf(other.row.id));
     await parent.append(frames.slice(0, 12));
     const store = new SnapshotStore(h.client, parent.row.id);
@@ -432,8 +433,13 @@ test("workerd: verified ten-minute replay, trusted cache rebuild, inherited fork
     const coldMs = performance.now() - began;
     const localEngine = await createHeadless(log.identity);
     const expected = await replayPages(
-      initialStats(),
-      [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames.slice(0, 21000)])],
+      initialReplayState(),
+      [
+        concat([
+          encodeJsonLine({ ...log.identity, formatVersion: 1 }),
+          ...log.frames.slice(0, 21000),
+        ]),
+      ],
       localEngine,
       writer.row.id,
     );
@@ -561,8 +567,8 @@ test("workerd: steady five-tic commits publish local Game stats and capped lobby
     const engine = await createHeadless(log.identity);
     let state = (
       await replayPages(
-        initialStats(),
-        [encode({ ...log.identity, formatVersion: 1 })],
+        initialReplayState(),
+        [encodeJsonLine({ ...log.identity, formatVersion: 1 })],
         engine,
         writer.row.id,
       )
@@ -653,7 +659,7 @@ test("workerd: a lost score response retries producer output without duplicate r
       return probe.scorePosts >= before.scorePosts + 2 ? true : undefined;
     }, "producer delivery retry");
     const rows = (
-      await h.entries<{ key: string; value: import("../../src/streams/v2").EntryRow }>()
+      await h.entries<{ key: string; value: import("../../src/streams/declarations").EntryRow }>()
     ).filter((row) => row.key === writer.row.id && row.value.score);
     expect([...new Set(rows.map((row) => row.value.score!.tic))]).toEqual([0, 175]);
     expect(rows.filter((row) => row.value.score!.tic === 175)).toHaveLength(1);
@@ -675,8 +681,10 @@ test("workerd: Game socket survives forced hibernation; Leaderboard/polling rece
   try {
     const browser = new ProtocolClient((await h.runtime().ready).href);
     const writer = await createSession(browser, { playerName: "Live HUD", identity });
-    const metadata = new StateRows<import("../../src/streams/v2").SessionMetadata>("session");
-    const entries = new StateRows<import("../../src/streams/v2").EntryRow>("game");
+    const metadata = new StateRows<import("../../src/streams/declarations").SessionMetadata>(
+      "session",
+    );
+    const entries = new StateRows<import("../../src/streams/declarations").EntryRow>("game");
     let gameSocket: WebSocket | undefined;
     const socketStats = new StateRows<StatsRow>("stats"),
       pollStats = new StateRows<StatsRow>("stats"),
@@ -875,7 +883,7 @@ test("workerd: snapshot endpoints reject writes, retry/restart keeps one row, ex
       { tic: 175, size: first.length },
     ]);
     expect(await snapshotBytes(h.client, id, 175)).toEqual(first);
-    for (const path of [indexPath(id), snapshotPath(id, 175)]) {
+    for (const path of [snapshotIndexPath(id), snapshotPath(id, 175)]) {
       for (const method of ["PUT", "POST", "DELETE", "PATCH", "OPTIONS"])
         expect((await h.send(path, { method })).status).toBe(405);
       const head = await h.send(path, { method: "HEAD" });
@@ -885,9 +893,9 @@ test("workerd: snapshot endpoints reject writes, retry/restart keeps one row, ex
     expect((await h.send(snapshotPath(id, 0))).status).toBe(404);
     for (const path of [
       `doom/v2/server-snapshots/bad`,
-      `${indexPath(id)}/-1`,
-      `${indexPath(id)}/1.5`,
-      `${indexPath(id)}/9007199254740992`,
+      `${snapshotIndexPath(id)}/-1`,
+      `${snapshotIndexPath(id)}/1.5`,
+      `${snapshotIndexPath(id)}/9007199254740992`,
     ])
       expect((await h.send(path)).status).toBe(400);
     for (const path of [`doom/v2/snapshots/${id}/175`, `doom/v2/snapshot-index/${id}`])
@@ -1128,7 +1136,7 @@ test("workerd: cold leaderboard snapshot is empty; 60 server sessions load the n
             forkTic: null,
           }),
         })
-      ).json()) as import("../../src/streams/v2").SessionMetadata;
+      ).json()) as import("../../src/streams/declarations").SessionMetadata;
       sessions.push(row);
     }
     const expected = sessions
@@ -1145,7 +1153,9 @@ test("workerd: cold leaderboard snapshot is empty; 60 server sessions load the n
       response = await h.send(path),
       text = await response.text(),
       elapsedMs = performance.now() - began;
-    const events = JSON.parse(text) as StateEvent<import("../../src/streams/v2").EntryRow>[];
+    const events = JSON.parse(text) as StateEvent<
+      import("../../src/streams/declarations").EntryRow
+    >[];
     expect(
       events
         .filter((e) => e.value)
@@ -1200,8 +1210,8 @@ test("workerd: cold rebuild restores newest snapshot, reuses page suffix and rea
         }
       ).frameReads;
     const expected = await replayPages(
-      initialStats(),
-      [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames])],
+      initialReplayState(),
+      [concat([encodeJsonLine({ ...log.identity, formatVersion: 1 }), ...log.frames])],
       await createHeadless(log.identity),
       id,
     );
@@ -1338,8 +1348,8 @@ test("workerd: engine transaction spike rolls snapshot, stats and checkpoint bac
     expect(JSON.parse((await checkpoint()).state).tic).toBe(175);
     expect(await snapshots()).toHaveLength(1);
     const expected = await replayPages(
-      initialStats(),
-      [concat([encode({ ...log.identity, formatVersion: 1 }), ...log.frames])],
+      initialReplayState(),
+      [concat([encodeJsonLine({ ...log.identity, formatVersion: 1 }), ...log.frames])],
       await createHeadless(log.identity),
       id,
     );

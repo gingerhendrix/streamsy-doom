@@ -4,17 +4,19 @@ import { Effect, Layer, ManagedRuntime, Stream } from "effect";
 import { BunStorage } from "@streamsy/storage/bun";
 import { CheckpointStore, Projection, Transaction } from "@streamsy/projection";
 import { Streamsy } from "@streamsy/core";
-import { Entries, Game, Leaderboard, type EntryRow, type StatsRow } from "../../src/streams/v2";
 import {
-  GameTable,
-  LeaderboardTable,
-  gameSnapshot,
-  stateSnapshot,
-  stateTableMigration,
-} from "../../src/server/state-snapshot";
+  Entries,
+  Game,
+  Leaderboard,
+  type EntryRow,
+  type StatsRow,
+} from "../../src/streams/declarations";
+import { gameSnapshot, stateSnapshot } from "../../src/server/state-snapshot";
+import { GameTable, LeaderboardTable, stateTableMigration } from "../../src/storage/state-tables";
 import { bootstrapSession } from "../../src/server/session";
-import { initLobbyStreams } from "../../src/server/lobby";
-import { leaderboard, recentFirst } from "../../src/projection/leaderboard";
+import { createLobbyStreamsThatNeverExpire } from "../../src/server/lobby";
+import { leaderboard } from "../../src/projection/leaderboard";
+import { recentFirst } from "../../src/streams/entry-order";
 import { StateRows, type StateEvent } from "../../src/streams/state";
 
 import { idOf, entryOf, statsOf } from "../helpers/state";
@@ -128,7 +130,7 @@ test("leaderboard keeps newest 50 with stable id ties, ignores the 55th, coalesc
   try {
     await rt.runPromise(
       Effect.gen(function* () {
-        yield* initLobbyStreams;
+        yield* createLobbyStreamsThatNeverExpire;
         const entries = yield* Entries,
           board = yield* Leaderboard;
         const rows = Array.from({ length: 60 }, (_, i) => entryOf(i + 1));

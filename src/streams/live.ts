@@ -1,148 +1,181 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import { ProtocolClient, ProtocolError, offsetOf } from "./protocol";
+import { parseJsonArray } from "./bytes";
+import { offsetOf, ProtocolError, STREAM_START, type ProtocolClient } from "./protocol";
+
+const RETRY_MISSING_STREAM_AFTER_MS = 1000;
+const LIVE_SOCKET_SUBPROTOCOL = "streamsy-live.v1";
+const CLOSE_CATCH_UP_REQUIRED = 4100;
+const CLOSE_SERVICE_RESTART = 1012;
 
 export type LiveTransport = "catch-up" | "websocket" | "long-poll";
+
 export interface FollowOptions<T> {
   signal: AbortSignal;
   from?: string;
   onBatch: (events: T[]) => void;
   onTransport?: (transport: LiveTransport) => void;
-  // Injection also lets a browser-shaped client exercise the real workerd socket.
   socket?: (url: string) => WebSocket;
   websocket?: boolean;
 }
-const decode = <T>(bytes: Uint8Array): T[] => {
-  const events = JSON.parse(new TextDecoder().decode(bytes) || "[]");
-  if (!Array.isArray(events)) throw new Error("Expected JSON stream array");
-  return events;
-};
-const retryDelay = (signal: AbortSignal) =>
+
+interface StreamPosition {
+  offset: string;
+  cursor?: string;
+}
+
+type SocketOutcome = "stream-ended-or-aborted" | "catch-up-over-http" | "socket-unavailable";
+
+const sleepUnlessAborted = (signal: AbortSignal, milliseconds: number) =>
   new Promise<void>((resolve) => {
-    const done = () => {
+    const wake = () => {
       clearTimeout(timer);
-      signal.removeEventListener("abort", done);
+      signal.removeEventListener("abort", wake);
       resolve();
     };
-    const timer = setTimeout(done, 1000);
-    signal.addEventListener("abort", done, { once: true });
-    if (signal.aborted) done();
+    const timer = setTimeout(wake, milliseconds);
+    signal.addEventListener("abort", wake, { once: true });
+    if (signal.aborted) wake();
   });
 
-/** HTTP catch-up, then hibernatable Cloudflare sockets or portable long poll.
- * Offsets are opaque and advance only on completed HTTP batches/socket controls.
- */
+const isStreamNotCreatedYet = (error: unknown) =>
+  error instanceof ProtocolError && error.status === 404;
+
+function liveSocketUrl(client: ProtocolClient, path: string, position: StreamPosition) {
+  const url = new URL(path, client.baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("offset", position.offset);
+  url.searchParams.set("live", "websocket");
+  if (position.cursor) url.searchParams.set("cursor", position.cursor);
+  return url.href;
+}
+
+function followSocketUntilItEnds<T>(
+  url: string,
+  position: StreamPosition,
+  options: FollowOptions<T>,
+) {
+  const { signal, onBatch, onTransport } = options;
+  return new Promise<SocketOutcome>((resolve, reject) => {
+    const socket = options.socket
+      ? options.socket(url)
+      : new WebSocket(url, LIVE_SOCKET_SUBPROTOCOL);
+    socket.binaryType = "arraybuffer";
+    let eventsAwaitingOffset: T[] = [];
+    let settled = false;
+
+    const release = () => {
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      socket.close();
+    };
+    const finish = (outcome: SocketOutcome) => {
+      if (settled) return;
+      release();
+      resolve(outcome);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      release();
+      reject(error);
+    };
+    const onAbort = () => finish("stream-ended-or-aborted");
+
+    const deliverAtControlOffset = (control: {
+      streamNextOffset?: unknown;
+      streamCursor?: string;
+      streamClosed?: boolean;
+    }) => {
+      if (typeof control.streamNextOffset !== "string") throw new Error("Missing socket offset");
+      onBatch(eventsAwaitingOffset);
+      eventsAwaitingOffset = [];
+      position.offset = control.streamNextOffset;
+      position.cursor = control.streamCursor;
+      if (control.streamClosed) finish("stream-ended-or-aborted");
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    socket.onopen = () => onTransport?.("websocket");
+    socket.onmessage = (message) => {
+      if (settled) return;
+      try {
+        if (typeof message.data !== "string") {
+          eventsAwaitingOffset.push(...parseJsonArray<T>(new Uint8Array(message.data)));
+          return;
+        }
+        const frame = JSON.parse(message.data);
+        if (frame.type === "control") deliverAtControlOffset(frame);
+      } catch (error) {
+        fail(error);
+      }
+    };
+    socket.onerror = () => finish("socket-unavailable");
+    socket.onclose = (close) => {
+      const serverAskedForCatchUp =
+        close.code === CLOSE_CATCH_UP_REQUIRED || close.code === CLOSE_SERVICE_RESTART;
+      finish(serverAskedForCatchUp ? "catch-up-over-http" : "socket-unavailable");
+    };
+    if (signal.aborted) onAbort();
+  });
+}
+
 export async function followJson<T>(
   client: ProtocolClient,
   path: string,
   options: FollowOptions<T>,
 ) {
   const { signal, onBatch, onTransport } = options;
-  let offset = options.from ?? "-1",
-    cursor: string | undefined,
-    live = false;
-  let useSocket =
+  const position: StreamPosition = { offset: options.from ?? STREAM_START };
+  let caughtUp = false;
+  let socketAvailable =
     options.websocket !== false &&
     (options.socket !== undefined || typeof WebSocket !== "undefined");
   try {
     while (!signal.aborted) {
-      onTransport?.(live ? "long-poll" : "catch-up");
-      let batch: Awaited<ReturnType<ProtocolClient["read"]>>;
+      onTransport?.(caughtUp ? "long-poll" : "catch-up");
+      let page: Awaited<ReturnType<ProtocolClient["read"]>>;
       try {
-        batch = await client.read(path, offset, live, signal, cursor);
+        page = await client.read(path, position.offset, caughtUp, signal, position.cursor);
       } catch (error) {
-        // State streams are created by trusted bootstrap, never by a browser PUT.
-        if (error instanceof ProtocolError && error.status === 404) {
-          await retryDelay(signal);
-          continue;
-        }
-        throw error;
+        if (!isStreamNotCreatedYet(error)) throw error;
+        await sleepUnlessAborted(signal, RETRY_MISSING_STREAM_AFTER_MS);
+        continue;
       }
       if (signal.aborted) return;
-      options.onBatch(decode<T>(batch.bytes));
-      const before = offset;
-      offset = batch.offset;
-      cursor = batch.cursor;
-      live = batch.upToDate;
-      if (batch.closed) return;
-      if (!live && offset === before) throw new Error("Read made no progress");
-      if (!live || !useSocket) continue;
-      const url = new URL(path, client.baseUrl);
-      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      url.searchParams.set("offset", offset);
-      url.searchParams.set("live", "websocket");
-      if (cursor) url.searchParams.set("cursor", cursor);
-      const result = await new Promise<"fallback" | "catch-up" | "closed">((resolve, reject) => {
-        const ws = options.socket
-          ? options.socket(url.href)
-          : new WebSocket(url.href, "streamsy-live.v1");
-        ws.binaryType = "arraybuffer";
-        let pending: T[] = [],
-          finished = false;
-        const finish = (result: "fallback" | "catch-up" | "closed") => {
-          if (finished) return;
-          finished = true;
-          signal.removeEventListener("abort", abort);
-          ws.close();
-          resolve(result);
-        };
-        const abort = () => finish("closed");
-        signal.addEventListener("abort", abort, { once: true });
-        ws.onopen = () => onTransport?.("websocket");
-        ws.onmessage = (event) => {
-          if (finished) return;
-          try {
-            if (typeof event.data !== "string")
-              pending.push(...decode<T>(new Uint8Array(event.data)));
-            else {
-              const frame = JSON.parse(event.data);
-              if (frame.type === "control") {
-                if (typeof frame.streamNextOffset !== "string")
-                  throw new Error("Missing socket offset");
-                onBatch(pending);
-                pending = [];
-                offset = frame.streamNextOffset;
-                cursor = frame.streamCursor;
-                if (frame.streamClosed) finish("closed");
-              }
-            }
-          } catch (error) {
-            if (!finished) {
-              finished = true;
-              signal.removeEventListener("abort", abort);
-              ws.close();
-              reject(error);
-            }
-          }
-        };
-        // Browsers hide the handshake status (including Bun's 426). Any upgrade
-        // failure or broken socket resumes HTTP from the last control offset.
-        ws.onerror = () => finish("fallback");
-        ws.onclose = (event) =>
-          finish(event.code === 4100 || event.code === 1012 ? "catch-up" : "fallback");
-        if (signal.aborted) abort();
-      });
-      if (result === "closed") return;
-      if (result === "fallback") useSocket = false;
-      live = false;
+      onBatch(parseJsonArray<T>(page.bytes));
+      const madeProgress = page.offset !== position.offset;
+      position.offset = page.offset;
+      position.cursor = page.cursor;
+      caughtUp = page.upToDate;
+      if (page.closed) return;
+      if (!caughtUp && !madeProgress) throw new Error("Read made no progress");
+      if (!caughtUp || !socketAvailable) continue;
+
+      const outcome = await followSocketUntilItEnds(
+        liveSocketUrl(client, path, position),
+        position,
+        options,
+      );
+      if (outcome === "stream-ended-or-aborted") return;
+      if (outcome === "socket-unavailable") socketAvailable = false;
+      caughtUp = false;
     }
   } catch (error) {
     if (!signal.aborted) throw error;
   }
 }
 
-/** Apply one consistent State snapshot, then resume at its opaque offset. */
 export async function followState<T>(
   client: ProtocolClient,
   options: FollowOptions<T> & { snapshot: string; stream: string },
 ) {
   try {
-    const response = await client.request(options.snapshot, { signal: options.signal });
-    const events = await response.json();
+    const snapshot = await client.request(options.snapshot, { signal: options.signal });
+    const events = await snapshot.json();
     if (!Array.isArray(events)) throw new Error("Expected State snapshot array");
-    const from = offsetOf(response);
+    const offsetAfterSnapshot = offsetOf(snapshot);
     if (options.signal.aborted) return;
     options.onBatch(events);
-    await followJson<T>(client, options.stream, { ...options, from });
+    await followJson<T>(client, options.stream, { ...options, from: offsetAfterSnapshot });
   } catch (error) {
     if (!options.signal.aborted) throw error;
   }

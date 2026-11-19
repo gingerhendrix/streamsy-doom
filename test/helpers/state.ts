@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import type { EntryRow, StatsRow } from "../../src/streams/v2";
+import type { EntryRow, StatsRow } from "../../src/streams/declarations";
 export const idOf = (n: number) => "a".repeat(32) + "_" + n.toString(16).padStart(32, "0");
 export const entryOf = (n: number): EntryRow => ({
   id: idOf(n),

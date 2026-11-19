@@ -14,7 +14,7 @@ import {
   forkSession,
   deleteSession,
   snapshotPath,
-  indexPath,
+  snapshotIndexPath,
   sessionPath,
   batchPath,
   type BatchBoundary,

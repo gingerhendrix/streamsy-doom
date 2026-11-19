@@ -2,8 +2,8 @@
 import { Schema } from "effect";
 import { Streamsy } from "@streamsy/core";
 import type { StateEvent } from "./state";
-import { familyIdPattern } from "./ids";
-export const SessionId = Schema.String.check(Schema.isPattern(familyIdPattern));
+import { sessionIdPattern } from "./ids";
+export const SessionId = Schema.String.check(Schema.isPattern(sessionIdPattern));
 const params = { id: SessionId };
 export class Sessions extends Streamsy.bytes<Sessions>()(
   "DoomV2/Sessions",

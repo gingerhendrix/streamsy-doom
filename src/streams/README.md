@@ -75,7 +75,7 @@ Both hosts reject the removed namespace under `/doom/*` with 404.
 | `doom/v2/bootstrap/:id` | POST validated session JSON; returns server metadata | `replay:<id>` (initializes Entries and Leaderboard first) |
 | `doom/v2/end/:id`, `doom/v2/delete/:id` | POST session lifecycle | `replay:<id>` |
 
-Declarations in `v2.ts` use the published Streamsy 0.12.0 APIs. Cloudflare links
+Declarations in `declarations.ts` use the published Streamsy 0.12.0 APIs. Cloudflare links
 and routing share `apps/host-cloudflare/topology.ts`. The replay host stores its
 identity before acquisition, attaches a concrete parameter-free local wake
 trigger, and reads the family's bytes remotely. The deterministic stats projection

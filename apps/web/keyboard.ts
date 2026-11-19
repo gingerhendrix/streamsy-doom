@@ -1,14 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import type { keys as engineKeys } from "../../engine/src/engine.js";
 
+type KeyEvent = Pick<KeyboardEvent, "code" | "key" | "type" | "preventDefault">;
+
+const DIGIT_ZERO_KEY_CODE = 48;
+const WEAPON_DIGITS = [1, 2, 3, 4, 5, 6, 7];
+
+const physicalCodeOfKeyName: Record<string, string> = {
+  Control: "ControlLeft",
+  Alt: "AltLeft",
+  Shift: "ShiftLeft",
+  " ": "Space",
+  ",": "Comma",
+  ".": "Period",
+};
+
+function physicalCodeWhenEventHasNone(key: string) {
+  if (physicalCodeOfKeyName[key]) return physicalCodeOfKeyName[key];
+  if (/^[wasd]$/i.test(key)) return `Key${key.toUpperCase()}`;
+  if (/^[1-7]$/.test(key)) return `Digit${key}`;
+  return key;
+}
+
 export class KeyboardControls {
-  private readonly mapping: Record<string, number>;
+  private readonly engineCodeOf: Record<string, number>;
   private readonly held = new Set<string>();
+
   constructor(
     keys: typeof engineKeys,
     private readonly sendKey: (code: number, down: boolean) => void,
   ) {
-    this.mapping = {
+    this.engineCodeOf = {
       KeyW: keys.up,
       KeyS: keys.down,
       KeyA: keys.left,
@@ -29,40 +51,30 @@ export class KeyboardControls {
       Comma: keys.strafeLeft,
       Period: keys.strafeRight,
     };
-    for (let n = 1; n <= 7; n++) this.mapping[`Digit${n}`] = 48 + n;
+    for (const digit of WEAPON_DIGITS)
+      this.engineCodeOf[`Digit${digit}`] = DIGIT_ZERO_KEY_CODE + digit;
   }
-  handle(event: Pick<KeyboardEvent, "code" | "key" | "type" | "preventDefault">, focused: boolean) {
-    // Some browser automation and older keyboards omit physical code.
-    const fallback: Record<string, string> = {
-      Control: "ControlLeft",
-      Alt: "AltLeft",
-      Shift: "ShiftLeft",
-      " ": "Space",
-      ",": "Comma",
-      ".": "Period",
-    };
-    const name =
-      event.code ||
-      fallback[event.key] ||
-      (/^[wasd]$/i.test(event.key)
-        ? `Key${event.key.toUpperCase()}`
-        : /^[1-7]$/.test(event.key)
-          ? `Digit${event.key}`
-          : event.key);
-    const code = this.mapping[name];
-    // Leave browser controls alone, but accept releases after focus moves away.
-    if (code === undefined || (!focused && (event.type === "keydown" || !this.held.has(name))))
-      return;
+
+  handle(event: KeyEvent, gameHasFocus: boolean) {
+    const physicalCode = event.code || physicalCodeWhenEventHasNone(event.key);
+    const engineCode = this.engineCodeOf[physicalCode];
+    if (engineCode === undefined) return;
+    const isPress = event.type === "keydown";
+    const isReleaseOfKeyPressedWhileFocused = !isPress && this.held.has(physicalCode);
+    if (!gameHasFocus && !isReleaseOfKeyPressedWhileFocused) return;
     event.preventDefault();
-    if (event.type === "keydown") this.held.add(name);
-    else this.held.delete(name);
-    this.sendKey(
-      code,
-      [...this.held].some((heldKey) => this.mapping[heldKey] === code),
-    );
+    if (isPress) this.held.add(physicalCode);
+    else this.held.delete(physicalCode);
+    this.sendKey(engineCode, this.anyHeldKeyMapsTo(engineCode));
   }
+
+  private anyHeldKeyMapsTo(engineCode: number) {
+    return [...this.held].some((heldCode) => this.engineCodeOf[heldCode] === engineCode);
+  }
+
   release() {
     this.held.clear();
-    for (const code of new Set(Object.values(this.mapping))) this.sendKey(code, false);
+    for (const engineCode of new Set(Object.values(this.engineCodeOf)))
+      this.sendKey(engineCode, false);
   }
 }
